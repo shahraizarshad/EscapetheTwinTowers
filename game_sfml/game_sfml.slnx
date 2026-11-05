@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="game_sfml.vcxproj" Id="a04c2af7-d3f3-4db6-8654-2d22775e51e6" />
+</Solution>
