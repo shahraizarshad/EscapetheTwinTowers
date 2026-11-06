@@ -4,7 +4,7 @@ int main() {
 	//opening a window and keep it open until 'x' is pressed
 	sf::RenderWindow Window(sf::VideoMode({ 800, 600 }), "Escape the twin towers");
 	//Drawing a rectangle
-	sf::RectangleShape rectangle({ 100,200 });     //rectangleShape:name of data type,rectangle:name,50=radius        
+	sf::RectangleShape rectangle({ 100,200 });     //rectangleShape:name of data type,rectangle:name        
 	rectangle.setFillColor(sf::Color::Green);  //fill colour in the rectangle
 	rectangle.setPosition({ 200,200 });         //position on window
 
