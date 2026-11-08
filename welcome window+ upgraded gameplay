@@ -1,0 +1,625 @@
+#include <SFML/Graphics.hpp>    //for graphics because simple cpp can perform limited calculations
+#include <iostream>         
+#include <vector>       //will be used to load and push_back obstacles
+#include <cstdlib>      //randomly generates the obstacles
+#include <ctime>
+#include <cmath>
+#include <optional>     //
+#include <string>
+#include <cstdint>
+
+using namespace std;
+
+const float TOWER_X = 800.f;        //the base of tower always starts from the 800'x 
+const float PLANE_Y = 330.f;        //the plane also always moves/initialzes in a fixed path
+
+float sx[40] = {};
+float sy[40] = {};
+float slife[40] = {};
+
+float rnd(float a, float b) {
+    return a + (b - a) * (rand() % 1001) / 1000.f;
+}
+
+void box(sf::RenderWindow& w, float x, float y,     //box() draws a rectangle
+    float wd, float ht, sf::Color c) {
+
+    sf::RectangleShape r({ wd, ht });
+    r.setPosition({ x, y });
+    r.setFillColor(c);
+    w.draw(r);
+}
+
+void ball(sf::RenderWindow& w, float x, float y,        //ball() draws a circle
+    float rad, sf::Color c) {
+
+    sf::CircleShape s(rad);
+    s.setOrigin({ rad, rad });
+    s.setPosition({ x, y });
+    s.setFillColor(c);
+    w.draw(s);
+}
+
+void poly(sf::RenderWindow& w, int n,       //ploy() draws a polygon of any sides. eg 3 for a triangle provided by SFML's convexshape
+    const float* p, sf::Color c) {
+
+    sf::ConvexShape s(n);
+
+    for (int i = 0; i < n; i++) {
+        s.setPoint(i, { p[2 * i], p[2 * i + 1] });
+    }
+
+    s.setFillColor(c);
+    w.draw(s);
+}
+
+void center(sf::RenderWindow& w, sf::Font& font,            //displays text of specified size in centre of the shape 
+    const char* str, int size,
+    float cx, float cy, sf::Color c) {
+
+    sf::Text t(font, str, size);
+
+    t.setFillColor(c);
+
+    sf::FloatRect b = t.getLocalBounds();
+
+    t.setOrigin({
+        b.position.x + b.size.x / 2,
+        b.position.y + b.size.y / 2
+        });
+
+    t.setPosition({ cx, cy });
+
+    w.draw(t);
+}
+
+void cloud(sf::RenderWindow& w,             //forms clouds using the concept of overlapping of several cirlces
+    float x, float y, float s) {
+
+    sf::Color white(255, 255, 255);
+
+    box(w, x + 15 * s, y - 30 * s,
+        90 * s, 30 * s, white);
+
+    ball(w, x + 15 * s, y - 15 * s,
+        15 * s, white);
+
+    ball(w, x + 105 * s, y - 15 * s,
+        15 * s, white);
+
+    ball(w, x + 35 * s, y - 32 * s,
+        22 * s, white);
+
+    ball(w, x + 62 * s, y - 42 * s,
+        28 * s, white);
+
+    ball(w, x + 88 * s, y - 32 * s,
+        20 * s, white);
+}
+
+void tower(sf::RenderWindow& w) {               
+
+    box(w, TOWER_X + 97, 165,
+        6, 40, sf::Color(70, 75, 85));
+
+    box(w, TOWER_X + 40, 205,
+        120, 25, sf::Color(95, 105, 120));
+
+    box(w, TOWER_X, 230,
+        200, 320, sf::Color(112, 122, 138));
+
+    box(w, TOWER_X, 230,
+        8, 320, sf::Color(85, 95, 110));
+
+    for (int r = 0; r < 6; r++) {
+        for (int c = 0; c < 5; c++) {
+
+            box(w,
+                TOWER_X + 18 + c * 36,
+                250 + r * 48,
+                22, 30,
+
+                (r + c) % 3 == 0
+                ? sf::Color(255, 235, 150)
+                : sf::Color(170, 215, 240));
+        }
+    }
+}
+
+void plane(sf::RenderWindow& w, float x, float y) {
+
+    sf::Color body(235, 235, 245);
+    sf::Color red(200, 40, 40);
+    sf::Color blue(90, 160, 215);
+
+    float fin[] = {
+        x - 125, y - 12,
+        x - 140, y - 48,
+        x - 112, y - 48,
+        x - 90, y - 12
+    };
+
+    float nose[] = {
+        x - 25, y - 12,
+        x, y,
+        x - 25, y + 12
+    };
+
+    float wing[] = {
+        x - 85, y + 8,
+        x - 50, y + 8,
+        x - 85, y + 45,
+        x - 115, y + 45
+    };
+
+    poly(w, 4, fin, red);
+
+    box(w, x - 130, y - 12,
+        105, 24, body);
+
+    poly(w, 3, nose, body);
+
+    box(w, x - 130, y + 2,
+        105, 5, red);
+
+    for (int i = 0; i < 5; i++) {
+        ball(w, x - 115 + i * 16,
+            y - 4, 4, blue);
+    }
+
+    poly(w, 4, wing,
+        sf::Color(175, 185, 205));
+
+    box(w, x - 95, y + 26,
+        30, 10, sf::Color(70, 80, 100));
+}
+
+struct Hazard {         //it is a data type used to combine multiple factors for a single shape.
+    float x;            //x coordinate of cloud1.x
+    float y;            //y coordrinate of cloud1.y
+    float speed;        //speed of cloud1.speed
+    float scale;        //size of cloud1.size
+};
+
+void stormCloud(sf::RenderWindow& w,        //this is the obstacle cloud
+    float x, float y, float s) {
+
+    sf::Color shade(65, 75, 95);
+
+    ball(w, x - 20 * s, y,
+        25 * s, shade);
+
+    ball(w, x + 10 * s, y - 10 * s,
+        32 * s, shade);
+
+    ball(w, x + 40 * s, y,
+        24 * s, shade);
+
+    ball(w, x + 10 * s, y + 15 * s,
+        22 * s, shade);
+}
+
+bool collision(float ax, float ay, float aw, float ah,
+    float bx, float by, float bw, float bh) {
+
+    if (ax + aw < bx || bx + bw < ax)
+        return false;
+
+    if (ay + ah < by || by + bh < ay)
+        return false;
+
+    return true;            //it will end the game
+}
+
+void title(sf::RenderWindow& w,
+    sf::Font& font, float t0) {
+
+    const char* words[4] = {
+        "ESCAPE", "THE", "TWIN", "TOWERSsss"
+    };
+
+    float width[4];
+    float total = 3 * 20;
+
+    for (int i = 0; i < 4; i++) {
+
+        sf::Text s(font, words[i], 44);
+
+        width[i] = s.getLocalBounds().size.x;
+
+        total += width[i];
+    }
+
+    float x = (1000 - total) / 2;
+
+    for (int i = 0; i < 4; i++) {
+
+        float t = t0 - i * 0.25f;
+
+        float dy = (t > 0 && t < 0.8f)
+            ? 25 * sin(6.2832f * t / 0.8f)
+            : 0;
+
+        sf::Text s(font, words[i], 44);
+
+        s.setFillColor(sf::Color(25, 20, 110));
+
+        s.setOutlineColor(sf::Color::White);
+
+        s.setOutlineThickness(3);
+
+        s.setPosition({ x, 100 - dy });
+
+        w.draw(s);
+
+        x += width[i] + 20;
+    }
+}
+
+int main() {
+
+    srand(static_cast<unsigned int>(time(nullptr)));
+
+    sf::RenderWindow window(
+        sf::VideoMode({ 1000u, 500u }),     //'u' means unsigned.
+        "Escape The Twin Towers"
+    );
+
+    window.setFramerateLimit(60);
+
+    sf::Font font;
+
+    if (!font.openFromFile("font.ttf") &&
+        !font.openFromFile("C:/Windows/Fonts/arial.ttf")) {
+
+        cout << "Font not found!" << endl;
+        return 1;
+    }
+
+    int state = 0;
+
+    float noseX = -20.f;
+    float menuTime = 0.f;
+    float smokeTimer = 0.f;
+
+    float planeX = 260.f;
+    float planeY = 300.f;
+
+    float obstacleTimer = 0.f;
+
+    int score = 0;
+
+    vector<Hazard> obstacles;
+
+    sf::Clock clock;
+
+    while (window.isOpen()) {
+
+        float dt = clock.restart().asSeconds();
+
+        if (dt > 0.05f)
+            dt = 0.05f;
+
+        sf::Vector2f mouse =
+            window.mapPixelToCoords(
+                sf::Mouse::getPosition(window));
+
+        bool hover =
+            mouse.x > 370 && mouse.x < 630 &&
+            mouse.y > 295 && mouse.y < 365;
+
+        while (const optional event = window.pollEvent()) {
+
+            if (event->is<sf::Event::Closed>()) {
+                window.close();
+            }
+
+            if (const auto* key =
+                event->getIf<sf::Event::KeyPressed>()) {
+
+                if (key->code == sf::Keyboard::Key::Escape &&
+                    (state == 2 || state == 3)) {
+
+                    state = 1;
+                    menuTime = 1.4f;
+                }
+
+                if (key->code == sf::Keyboard::Key::R &&
+                    state == 3) {
+
+                    planeX = 260.f;
+                    planeY = 300.f;
+
+                    obstacles.clear();
+
+                    obstacleTimer = 0.f;
+                    score = 0;
+
+                    state = 2;
+                }
+            }
+
+            if (event->getIf<sf::Event::MouseButtonPressed>()) {
+
+                if (state == 1 &&
+                    menuTime > 1.3f &&
+                    hover) {
+
+                    planeX = 260.f;
+                    planeY = 300.f;
+
+                    obstacles.clear();
+
+                    obstacleTimer = 0.f;
+                    score = 0;
+
+                    state = 2;
+                }
+            }
+        }
+
+        if (state == 0) {
+
+            for (int i = 0; i < 40; i++) {
+
+                if (slife[i] > 0) {
+
+                    slife[i] -= 0.8f * dt;
+                    sy[i] -= 12 * dt;
+                }
+            }
+
+            noseX += 300 * dt;
+
+            smokeTimer += dt;
+
+            if (smokeTimer > 0.03f) {
+
+                smokeTimer = 0;
+
+                for (int i = 0; i < 40; i++) {
+
+                    if (slife[i] <= 0) {
+
+                        sx[i] = noseX - 100;
+                        sy[i] = PLANE_Y + 30;
+
+                        slife[i] = 1.f;
+
+                        break;
+                    }
+                }
+            }
+
+            if (noseX > 1150.f) {
+
+                state = 1;
+                menuTime = 0.f;
+            }
+        }
+
+        else if (state == 1) {
+
+            menuTime += dt;
+        }
+
+        else if (state == 2) {
+
+            float speed = 280.f;
+
+            if (sf::Keyboard::isKeyPressed(             //checks if 'A' or left arrow is pressed.
+                sf::Keyboard::Key::Left) ||
+                sf::Keyboard::isKeyPressed(
+                    sf::Keyboard::Key::A)) {
+
+                planeX -= speed * dt;           //moves the plane along negative x axis
+            }
+
+            if (sf::Keyboard::isKeyPressed(
+                sf::Keyboard::Key::Right) ||
+                sf::Keyboard::isKeyPressed(
+                    sf::Keyboard::Key::D)) {
+
+                planeX += speed * dt;               //plane moves along positive x axis
+            }
+
+            if (sf::Keyboard::isKeyPressed(
+                sf::Keyboard::Key::Up) ||
+                sf::Keyboard::isKeyPressed(
+                    sf::Keyboard::Key::W)) {
+
+                planeY -= speed * dt;       // value of y axis increases downwards so '-' is used for 'W' || up
+            }
+
+            if (sf::Keyboard::isKeyPressed(
+                sf::Keyboard::Key::Down) ||
+                sf::Keyboard::isKeyPressed(
+                    sf::Keyboard::Key::S)) {
+
+                planeY += speed * dt;
+            }
+                                            //the coordinates of plane are counted from the frontal end of it
+            if (planeX < 140.f)
+                planeX = 140.f;
+
+            if (planeX > 1000.f)            //the overall width of gaming wondow is 1000 so we cannot let the plane cross it, as of now
+                planeX = 1000.f;
+
+            if (planeY < 50.f)
+                planeY = 50.f;
+
+            if (planeY > 505.f)
+                planeY = 505.f;
+
+            obstacleTimer += dt;
+
+            if (obstacleTimer >= 1.0f) {   //this value indicates the time after which a new obstacle has to be genertaed.
+
+                Hazard h;               //here takes place the creation of the obstacle i.e storm-cloud
+
+                h.x = 70.f + static_cast<float>(rand() % 820);
+                //70 is always added because we do not want the obstacle to be very close 
+
+                h.y = -60.f;            //the obstacle starts before the y-axis to keep it out of sight of user
+
+                h.speed = 160.f +
+                    static_cast<float>(rand() % 100);
+
+                h.scale = 0.5f +
+                    static_cast<float>(rand() % 50) / 100.f;
+
+                obstacles.push_back(h);
+
+                obstacleTimer = 0.f;            //timer is set to 0 after creation of an obstacle
+            }
+
+            for (int i = static_cast<int>(obstacles.size()) - 1;        //it starts with the number of obstacles used till the time
+                i >= 0; i--) {                                          // subtracting one from the number gives the index
+
+                Hazard& h = obstacles[i];               //the loop runs backward because we are removing obstacles from the screen
+
+                h.y += h.speed * dt;                //the obstacles moves downward along +y-axis
+
+                float aircraftLeft = planeX - 140.f;
+                float aircraftTop = planeY - 48.f;
+
+                float cloudLeft = h.x - 45.f * h.scale;
+                float cloudTop = h.y - 42.f * h.scale;
+
+                float cloudWidth = 110.f * h.scale;
+                float cloudHeight = 80.f * h.scale;
+
+                if (collision(
+                    aircraftLeft, aircraftTop, 140.f, 93.f,
+                    cloudLeft, cloudTop, cloudWidth, cloudHeight)) {
+                                                                        //after collosion, gameplay window is closed
+                    state = 3;
+                    break;
+                }
+
+                if (h.y - 42.f * h.scale > 600.f) {         //600 is the height of gaming window, it checks whether the obstacle has left the screen
+
+                    obstacles.erase(obstacles.begin() + i);
+
+                    score++;
+                }
+            }
+        }
+
+        window.clear(sf::Color(140, 210, 240));
+
+        cloud(window, 60, 130, 1.0f);
+        cloud(window, 330, 90, 1.2f);
+        cloud(window, 600, 150, 0.9f);
+
+        cloud(window, 120, 480, 1.1f);
+        cloud(window, 450, 520, 1.3f);
+
+        if (state == 0 || state == 1) {
+            tower(window);
+        }
+
+        box(window, 0, 550, 1000, 50,
+            sf::Color(90, 170, 90));
+
+        if (state == 0) {
+
+            for (int i = 0; i < 40; i++) {
+
+                if (slife[i] > 0) {
+
+                    sf::Color c(
+                        255, 255, 255,
+                        static_cast<uint8_t>(slife[i] * 200));
+
+                    ball(window, sx[i], sy[i],
+                        5 + (1 - slife[i]) * 14, c);
+                }
+            }
+
+            plane(window, noseX, PLANE_Y);
+
+            center(window, font,
+                "A NEW JOURNEY BEGINS", 22,
+                500, 570, sf::Color::White);
+        }
+
+        else if (state == 1) {
+
+            title(window, font, menuTime);
+
+            if (menuTime > 1.3f) {
+
+                box(window, 367, 292, 266, 76,
+                    sf::Color(25, 25, 112));
+
+                box(window, 370, 295, 260, 70,
+                    hover
+                    ? sf::Color(255, 200, 40)
+                    : sf::Color(60, 70, 160));
+
+                center(window, font, "PLAY", 36,
+                    500, 330,
+                    hover
+                    ? sf::Color(25, 25, 112)
+                    : sf::Color::White);
+            }
+        }
+
+        else if (state == 2) {
+
+            for (const auto& h : obstacles) {
+
+                stormCloud(window, h.x, h.y, h.scale);
+            }
+
+            plane(window, planeX, planeY);
+
+            string scoreString = "Score: " + to_string(score);
+
+            sf::Text scoreText(font, scoreString, 24);
+
+            scoreText.setFillColor(sf::Color::Black);
+
+            scoreText.setPosition({ 20.f, 20.f });
+
+            window.draw(scoreText);
+
+            center(window, font,
+                "Use Arrow Keys or WASD to Move",
+                18, 500, 575, sf::Color::Black);
+        }
+
+        else if (state == 3) {
+
+            for (const auto& h : obstacles) {
+
+                stormCloud(window, h.x, h.y, h.scale);
+            }
+
+            plane(window, planeX, planeY);
+
+            center(window, font,
+                "GAME OVER", 55,
+                500, 220, sf::Color::Red);
+
+            string finalScore = "Final Score: " + to_string(score);
+
+            center(window, font,
+                finalScore.c_str(), 30,
+                500, 300, sf::Color::Black);
+
+            center(window, font,
+                "Press R to Restart", 25,
+                500, 370, sf::Color::Black);
+
+            center(window, font,
+                "Press ESC to return to Menu", 20,
+                500, 420, sf::Color::Black);
+        }
+
+        window.display();
+    }
+
+    return 0;
+}
