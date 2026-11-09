@@ -1,0 +1,111 @@
+ drawing the obstacles 
+sf::Color windowColor(int r, int c) {                                 // more windows light up when it gets dark
+    bool lit = (r + c) % 3 == 0 || (look.night > 0.5f && (r * 2 + c) % 2 == 0);
+    return lit ? sf::Color(255, 235, 150) : mix(sf::Color(170, 215, 240), sf::Color(40, 55, 90), look.night);
+}
+void drawBlock(sf::RenderWindow& w, float x, float y, float h) {      // a steel tower blockment
+    box(w, x, y, TOWER_W, h, sf::Color(112, 122, 138));
+    box(w, x, y, 6, h, sf::Color(85, 95, 110));                           // darker left edge
+    for (int r = 0; 14 + r * 40 + 24 < h; r++)                            // window 
+        for (int c = 0; c < 3; c++) box(w, x + 14 + c * 26, y + 14 + r * 40, 16, 24, windowColor(r, c));
+}
+void drawGroundTower(sf::RenderWindow& w, float x, float y, float h) {
+    drawBlock(w, x, y, h);
+    box(w, x - 4, y - 8, TOWER_W + 8, 10, sf::Color(95, 105, 120));       // roof
+    box(w, x + TOWER_W / 2 - 2, y - 30, 4, 22, sf::Color(70, 75, 85));    // antenna
+}
+void drawGate(sf::RenderWindow& w, const Obstacle& o) {
+    drawBlock(w, o.x, 0, o.y);                                            // top block hangs from the sky
+    drawBlock(w, o.x, o.y + o.h, GROUND_Y - o.y - o.h);                   // bottom block stands on the ground
+    sf::Color warn(255, 200, 30);
+    box(w, o.x - 4, o.y - 8, TOWER_W + 8, 8, warn);                       // yellow caps mark the moving gap
+    box(w, o.x - 4, o.y + o.h, TOWER_W + 8, 8, warn);
+}
+void drawStormCloud(sf::RenderWindow& w, const Obstacle& o) {
+    float s = o.w / 120.f;                                                // cloud sizeee
+    sf::Color rim = mix(sf::Color(90, 90, 110), sf::Color(200, 205, 230), look.night);   // ye dark lighting ko accomodate krne keliye
+    cloud(w, o.x - 3, o.y + o.h + 3, s * 1.05f, rim);
+    cloud(w, o.x, o.y + o.h, s, mix(sf::Color(38, 38, 50), sf::Color(105, 110, 150), look.night));                    // dark body
+    cloud(w, o.x + 0.12f * o.w, o.y + o.h - 4, s * 0.75f, mix(sf::Color(58, 58, 74), sf::Color(130, 135, 170), look.night));   // lighter middle
+}
+void drawBird(sf::RenderWindow& w, const Obstacle& o) {
+    float cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+    float flap = std::sin(o.timer * 16) * 14;                             // wing goes up and down
+    float wing[] = {cx - 8, cy, cx + 8, cy, cx + 2, cy - flap};
+    float tail[] = {cx + 6, cy - 2, cx + 20, cy + 2, cx + 6, cy + 4};
+    float beak[] = {cx - 14, cy - 5, cx - 22, cy - 2, cx - 14, cy};
+    sf::Color dark = mix(sf::Color(25, 25, 30), sf::Color(215, 220, 235), look.night);   // adjustment of bird lightening 
+    poly(w, 3, wing, dark);
+    poly(w, 3, tail, dark);
+    ball(w, cx, cy, 8, dark);                                             // body
+    ball(w, cx - 10, cy - 3, 5, dark);                                    // head
+    poly(w, 3, beak, sf::Color(240, 160, 30));
+}
+void drawBolt(sf::RenderWindow& w, const Obstacle& o) {
+    float cx = o.x + o.w / 2;
+    cloud(w, cx - 90, 100, 1.5f, mix(sf::Color(40, 40, 52), sf::Color(105, 110, 150), look.night));   // the storm cloud it comes from
+    if (o.timer < 1.2f) {                                                 // WARNING: flashing dashed yellow line
+        int a = (int)(90 + 120 * (0.5f + 0.5f * std::sin(o.timer * 18)));
+        for (float yy = 105; yy < GROUND_Y; yy += 34) box(w, cx - 3, yy, 6, 18, sf::Color(255, 230, 60, a));
+    } else {                                                              // STRIKE: zigzag bolt from cloud to ground
+        float x0 = cx, y0 = 100;
+        for (int k = 1; y0 < GROUND_Y; k++) {
+            float x1 = cx + ((k % 2) ? 18.f : -18.f), y1 = std::min(y0 + 55.f, GROUND_Y);
+            float outer[] = {x0 - 9, y0, x0 + 9, y0, x1 + 9, y1, x1 - 9, y1};
+            float inner[] = {x0 - 3, y0, x0 + 3, y0, x1 + 3, y1, x1 - 3, y1};
+            poly(w, 4, outer, sf::Color(255, 230, 60, 200));
+            poly(w, 4, inner, sf::Color::White);
+            x0 = x1;  y0 = y1;
+        }
+        box(w, 0, 0, 1000, 600, sf::Color(255, 255, 255, 60));            // whole screen flashes
+    }
+}
+void drawCrane(sf::RenderWindow& w, const Obstacle& o) {
+    float cx = 0, cy = 0;
+    float ang = cranePos(o, cx, cy);
+    float ax = o.x + o.w / 2;                                             // where the rope is fixed (top of the screen)
+    sf::RectangleShape rope({3.f, o.h});                                  // the rope is a thin rectangle that swings
+    rope.setOrigin({1.5f, 0.f});
+    rope.setPosition({ax, 0.f});
+    rope.setRotation(sf::radians(-ang));
+    rope.setFillColor(mix(sf::Color(60, 60, 70), sf::Color(210, 215, 230), look.night));
+    w.draw(rope);
+    box(w, ax - 16, 0, 32, 10, sf::Color(90, 95, 110));                   
+    sf::Color wood(150, 80, 20);
+    box(w, cx - 28, cy - 28, 56, 56, sf::Color(220, 130, 40));            // cargo crate (this is the deadly part)
+    box(w, cx - 28, cy - 28, 56, 7, wood);
+    box(w, cx - 28, cy + 21, 56, 7, wood);
+    box(w, cx - 3, cy - 28, 6, 56, wood);
+}
+void drawDrone(sf::RenderWindow& w, const Obstacle& o) {
+    float cx = o.x + o.w / 2;
+    sf::Color dark = mix(sf::Color(45, 50, 60), sf::Color(200, 205, 225), look.night);
+    box(w, o.x, o.y + 8, o.w, 14, dark);                                  // body
+    box(w, cx - 3, o.y + 2, 6, 8, dark);                                  // mast
+    float span = ((int)(o.timer * 30) % 2) ? 50.f : 36.f;                 // rotor blur flickers between two widths
+    box(w, cx - span / 2, o.y, span, 3, dark);
+    ball(w, cx, o.y + 15, 3.5f, ((int)(o.timer * 5) % 2) ? sf::Color(255, 40, 40) : sf::Color(120, 20, 20));   // blinking light
+}
+void drawWind(sf::RenderWindow& w, const Obstacle& o) {
+    box(w, o.x, o.y, o.w, o.h, sf::Color(255, 255, 255, 38));             // faint white zone
+    box(w, o.x, o.y, o.w, 3, sf::Color(255, 255, 255, 120));              // top edge
+    box(w, o.x, o.y + o.h - 3, o.w, 3, sf::Color(255, 255, 255, 120));    // bottom edge
+    for (int k = 0; k < 5; k++) {                                         // streaks travel in the wind's direction
+        float sxk = o.x + 30 + k * 48;
+        float off = std::fmod(o.timer * 140 + k * 37, o.h - 28);
+        float syk = (o.dir > 0) ? o.y + 14 + off : o.y + o.h - 14 - off;
+        box(w, sxk, syk - 14, 4, 28, sf::Color(255, 255, 255, 190));
+    }
+}
+void drawObstacles(sf::RenderWindow& w) {
+    for (const Obstacle& o : obs) if (o.type == O_WIND) drawWind(w, o);   // wind first  so it is behind everything
+    for (const Obstacle& o : obs) {
+        if (o.type == O_TOWER) drawGroundTower(w, o.x, o.y, o.h);
+        else if (o.type == O_GATE) drawGate(w, o);
+        else if (o.type == O_CLOUD) drawStormCloud(w, o);
+        else if (o.type == O_BIRD) drawBird(w, o);
+        else if (o.type == O_DRONE) drawDrone(w, o);
+        else if (o.type == O_CRANE) drawCrane(w, o);
+        else if (o.type == O_BOLT) drawBolt(w, o);
+    }
+}
