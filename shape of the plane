@@ -1,0 +1,114 @@
+#include <SFML/Graphics.hpp>
+#include <cmath>
+#include <initializer_list>
+#include <vector>
+
+// -plane skins 
+struct Skin { const char* name; sf::Color body, accent, glass, wing; int price; };
+const int NSK = 5; // skins 0-4 are in the shop, skin 5 is player 2's plane
+const Skin SKINS[6] = {
+    {"CLASSIC",  sf::Color(235, 235, 245), sf::Color(200, 40, 40),   sf::Color(90, 160, 215),  sf::Color(175, 185, 205), 0},
+    {"SUNSET",   sf::Color(255, 225, 190), sf::Color(235, 110, 30),  sf::Color(255, 240, 160), sf::Color(225, 160, 110), 30},
+    {"STEALTH",  sf::Color(70, 75, 90),    sf::Color(40, 200, 220),  sf::Color(30, 50, 70),    sf::Color(50, 55, 70),    60},
+    {"GOLD",     sf::Color(245, 205, 70),  sf::Color(150, 100, 10),  sf::Color(255, 250, 210), sf::Color(200, 160, 50),  100},
+    {"NEON",     sf::Color(30, 30, 45),    sf::Color(255, 60, 200),  sf::Color(80, 255, 160),  sf::Color(60, 60, 90),    150},
+    {"CO-PILOT", sf::Color(200, 240, 220), sf::Color(30, 150, 90),   sf::Color(250, 250, 150), sf::Color(120, 190, 150), 0}
+};
+
+//  shape & color helpers // ye enhancement part h shop walay code ka the one already in main.cpp.
+extern float bgTime;       // animation clock from main game
+sf::Transform gXf;         // rotation transform applied while drawing the plane
+
+inline void box(sf::RenderWindow& w, float x, float y, float wd, float ht, sf::Color c) {
+    sf::RectangleShape r({wd, ht});
+    r.setPosition({x, y});
+    r.setFillColor(c);
+    w.draw(r, sf::RenderStates(gXf));
+}
+
+inline void ball(sf::RenderWindow& w, float x, float y, float rad, sf::Color c) {
+    sf::CircleShape s(rad);
+    s.setOrigin({rad, rad});
+    s.setPosition({x, y});
+    s.setFillColor(c);
+    w.draw(s, sf::RenderStates(gXf));
+}
+
+inline void poly(sf::RenderWindow& w, int n, const float* p, sf::Color c) {
+    sf::ConvexShape s(n);
+    for (int i = 0; i < n; i++) s.setPoint(i, {p[2 * i], p[2 * i + 1]});
+    s.setFillColor(c);
+    w.draw(s, sf::RenderStates(gXf));
+}
+
+inline sf::Color mix(sf::Color a, sf::Color b, float t) {
+    return sf::Color((unsigned char)(a.r + (b.r - a.r) * t),
+                     (unsigned char)(a.g + (b.g - a.g) * t),
+                     (unsigned char)(a.b + (b.b - a.b) * t));
+}
+
+//  fighter jet plane shape // is part me basically i tried to make the shape of the plane better
+// (x, y) = tip of the nose, skin = index in SKINS, tilt = angle in degrees, flame = afterburner size (0 = off)
+inline void plane(sf::RenderWindow& w, float x, float y, int skin = 0, float tilt = 0, float flame = 0) {
+    const Skin& s = SKINS[skin];
+    gXf = sf::Transform();
+    gXf.rotate(sf::degrees(tilt), {x - 62, y});
+
+    // 1) Rear afterburner flame
+    if (flame > 0) {
+        float f = flame * (0.85f + 0.3f * std::sin(bgTime * 50));
+        float outer[] = {x - 132, y - 3,    x - 132 - 34 * f, y + 1, x - 132, y + 5};
+        float mid[]   = {x - 132, y - 1.8f, x - 132 - 22 * f, y + 1, x - 132, y + 3.8f};
+        float core[]  = {x - 132, y - 0.8f, x - 132 - 11 * f, y + 1, x - 132, y + 2.8f};
+        poly(w, 3, outer, sf::Color(255, 110, 20, 220));
+        poly(w, 3, mid,   sf::Color(255, 215, 70, 240));
+        poly(w, 3, core,  sf::Color(180, 235, 255));
+    }
+
+    auto shape = [&](std::initializer_list<float> pts, sf::Color c) {
+        std::vector<float> p;
+        int k = 0;
+        for (float v : pts) p.push_back(v + ((k++ % 2 == 0) ? x : y));
+        poly(w, (int)(pts.size() / 2), p.data(), c);
+    };
+
+    sf::Color black(0, 0, 0);
+    sf::Color farWing = mix(s.wing, black, 0.35f);
+    sf::Color farFin  = mix(s.accent, black, 0.35f);
+    sf::Color belly   = mix(s.body, black, 0.18f);
+    sf::Color radome  = mix(s.body, sf::Color(35, 40, 50), 0.50f);
+
+    // 2) Far-side twin tail fin & far wing
+    shape({-108, -7,  -128, -39,  -116, -39,  -92, -7}, farFin);
+    shape({-52, -6,   -84, -6,    -102, -18,  -88, -18}, farWing);
+
+    // 3) Under-fuselage supersonic air intake
+    shape({-40, 7,   -74, 7,   -78, 15,  -44, 15}, belly);
+    shape({-40, 8,   -45, 8,   -47, 14,  -43, 14}, sf::Color(20, 22, 28));
+
+    // 4) Main sleek fighter fuselage
+    shape({0, 2,   -16, -3,   -34, -7,   -96, -8,   -118, -5,  -128, -3,
+           -128, 5,  -112, 8,   -72, 9,   -38, 9,   -16, 6}, s.body);
+    shape({-16, 6,  -38, 9,   -72, 9,   -112, 8,  -124, 5,   -124, 3,  -20, 3}, belly);
+    shape({0, 2,   -16, -3,   -22, -4,  -22, 6.5f, -16, 6}, radome);
+    box(w, x - 2, y + 1.2f, 10, 1.5f, sf::Color(190, 195, 205)); // nose pitot probe
+
+    // 5) Bubble canopy, pilot helmet & glass reflection
+    shape({-24, -6,  -34, -14,  -50, -16,  -64, -13,  -72, -7}, sf::Color(40, 45, 58));
+    shape({-26, -6,  -35, -13,  -49, -15,  -62, -12,  -68, -7}, s.glass);
+    ball(w, x - 45, y - 9.5f, 3.3f, sf::Color(45, 50, 62));
+    box(w, x - 44, y - 10.8f, 3.f, 2.f, sf::Color(230, 185, 50));
+    shape({-36, -12,  -48, -14,  -58, -11.5f,  -47, -12.5f}, sf::Color(255, 255, 255, 135));
+
+    // 6) Squadron accent stripe
+    shape({-24, 1,  -116, 0,  -116, 3.5f,  -24, 3.5f}, s.accent);
+
+    // 7) Near-side swept vertical tail fin & horizontal stabilator
+    shape({-104, -7,  -134, -44,  -118, -44,  -84, -7}, s.accent);
+    shape({-134, -44, -118, -44,  -121, -38,  -131, -38}, s.body);
+    shape({-108, 2,   -124, 2,    -138, 13,   -126, 13}, s.wing);
+
+    // 8) Swept delta main wing + wingtip missile
+    shape({-50, 3,   -86, 3,   -108, 34,  -92, 34}, s.wing);
+    shape({-50, 3,   -54, 3,   -95, 34,   -92, 34}, mix(s.wing, sf::Color::White, 0.35f));
+    box(w, x - 109, y + 33, 22, 3.5f, sf::Color(23
