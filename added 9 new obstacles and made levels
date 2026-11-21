@@ -1,0 +1,840 @@
+
+// ESCAPE THE TWIN TOWERS - intro + menu + gameplay with 9 obstacle
+
+#include <SFML/Audio.hpp>
+#include <SFML/Graphics.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace fs = std::filesystem;
+
+// ===================== game states =====================
+enum State { NOTICE, INTRO, MENU, PLAYING, PAUSED, GAMEOVER };
+
+// ===================== asset finding (font + music) =====================
+// Looks for a file in the places where it is most likely to be, and returns its full path ("" if not found):
+//   1) the folder you ran the game from   2) an "assets" folder there
+//   3) the folder of the program itself (e.g. output/)   4) the folder above it (e.g. arrayprograms/)   + their "assets"
+// Because we check that the file exists BEFORE asking SFML to open it, SFML prints no error messages.
+std::string findAsset(const std::string& name) {
+    std::error_code ec;
+    std::vector<fs::path> dirs;
+    fs::path cwd = fs::current_path(ec);
+    if (!ec) { dirs.push_back(cwd);  dirs.push_back(cwd / "assets"); }
+    fs::path exe = fs::read_symlink("/proc/self/exe", ec);            // Linux / WSL: where the program lives
+    if (!ec) {
+        fs::path d = exe.parent_path();
+        dirs.push_back(d);                  dirs.push_back(d / "assets");
+        dirs.push_back(d.parent_path());    dirs.push_back(d.parent_path() / "assets");
+    }
+    for (const fs::path& d : dirs) {
+        fs::path p = d / name;
+        if (fs::is_regular_file(p, ec)) return p.string();
+    }
+    return "";
+}
+// Loads font.ttf if we have one, otherwise the first system font that exists. Returns false only if nothing works.
+bool loadFont(sf::Font& font) {
+    std::string mine = findAsset("font.ttf");
+    if (!mine.empty() && font.openFromFile(mine)) return true;
+    const char* fontPaths[] = {
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",           // Ubuntu / WSL (package fonts-dejavu-core)
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+        "/mnt/c/Windows/Fonts/arialbd.ttf",                              
+        "/mnt/c/Windows/Fonts/arial.ttf",
+        "/mnt/c/Windows/Fonts/segoeui.ttf"
+    };
+    std::error_code ec;
+    for (const char* p : fontPaths)
+        if (fs::is_regular_file(p, ec) && font.openFromFile(p)) return true;
+    return false;
+}
+// Returns the path of the first music file found ("" if there is none)
+std::string findMusic() {
+    const char* names[] = {"music.ogg", "music.wav", "music.mp3", "music.flac"};
+    for (const char* n : names) {
+        std::string p = findAsset(n);
+        if (!p.empty()) return p;
+    }
+    return "";
+}
+
+// intro data
+const float TOWER_X = 800, PLANE_Y = 330;       // left wall of the tower, height of the plane
+const int N = 120;                              // number of explosion particles
+float px[N], py[N], vx[N], vy[N], life[N];      // explosion particles (life 0 = unused)
+float sx[40], sy[40], slife[40];                // white smoke puffs behind the plane
+
+// ===================== gameplay data =====================
+const float TOWER_W = 90, GROUND_Y = 550;       // width of a ground tower, y of the top of the ground
+float pX = 300, pY = 280;                       // player = tip of the plane's nose
+float scrollSpeed = 250, hitFlash = 0;          // how fast the world moves left, red flash after a crash
+int score = 0, best = 0;
+// difficulty tier = score / 200.  The tier also decides the sky: DAY -> SUNSET -> STORM -> NIGHT -> DAWN -> DAY ...
+const char* STAGE[5] = {"DAY", "SUNSET", "STORM", "NIGHT", "DAWN"};
+float bannerTime = 0;                           // seconds left to show the "TIER n - NAME" banner
+int lastLevel = 0;                              // the tier we showed last (to detect a new tier)
+
+float rnd(float a, float b) { return a + (b - a) * (rand() % 1001) / 1000.f; }
+
+// ---------- small drawing helpers ----------
+void box(sf::RenderWindow& w, float x, float y, float wd, float ht, sf::Color c) {
+    sf::RectangleShape r({wd, ht});  r.setPosition({x, y});  r.setFillColor(c);  w.draw(r);
+}
+void ball(sf::RenderWindow& w, float x, float y, float rad, sf::Color c) {
+    sf::CircleShape s(rad);  s.setOrigin({rad, rad});  s.setPosition({x, y});  s.setFillColor(c);  w.draw(s);
+}
+void poly(sf::RenderWindow& w, int n, const float* p, sf::Color c) {   // p = x1,y1,x2,y2,...
+    sf::ConvexShape s(n);
+    for (int i = 0; i < n; i++) s.setPoint(i, {p[2 * i], p[2 * i + 1]});
+    s.setFillColor(c);  w.draw(s);
+}
+void center(sf::RenderWindow& w, sf::Font& font, const char* str, int size, float cx, float cy, sf::Color c) {
+    sf::Text t(font, str, size);
+    t.setFillColor(c);
+    sf::FloatRect b = t.getLocalBounds();
+    t.setOrigin({b.position.x + b.size.x / 2, b.position.y + b.size.y / 2});
+    t.setPosition({cx, cy});
+    w.draw(t);
+}
+void label(sf::RenderWindow& w, sf::Font& font, const std::string& str, int size, float x, float y, sf::Color c) {
+    sf::Text t(font, str, size);                                      // left-aligned text with white outline
+    t.setFillColor(c);
+    t.setOutlineColor(sf::Color::White);
+    t.setOutlineThickness(2);
+    t.setPosition({x, y});
+    w.draw(t);
+}
+sf::Color mix(sf::Color a, sf::Color b, float t) {                    // blend two colors: t = 0 gives a, t = 1 gives b
+    return sf::Color((unsigned char)(a.r + (b.r - a.r) * t),
+                     (unsigned char)(a.g + (b.g - a.g) * t),
+                     (unsigned char)(a.b + (b.b - a.b) * t));
+}
+float fl(float a, float b, float t) { return a + (b - a) * t; }       // blend two numbers
+
+//  scenery shapes 
+// flat-bottom cartoon cloud. (x, y) = left end of the flat bottom. s = size. col = color (white by default)
+void cloud(sf::RenderWindow& w, float x, float y, float s, sf::Color col = sf::Color(255, 255, 255)) {
+    box(w, x + 15 * s, y - 30 * s, 90 * s, 30 * s, col);
+    ball(w, x + 15 * s, y - 15 * s, 15 * s, col);
+    ball(w, x + 105 * s, y - 15 * s, 15 * s, col);
+    ball(w, x + 35 * s, y - 32 * s, 22 * s, col);
+    ball(w, x + 62 * s, y - 42 * s, 28 * s, col);
+    ball(w, x + 88 * s, y - 32 * s, 20 * s, col);
+}
+void tower(sf::RenderWindow& w) {                                     // the big tower used in the intro / menu
+    box(w, TOWER_X + 97, 165, 6, 40, sf::Color(70, 75, 85));          // antenna
+    box(w, TOWER_X + 40, 205, 120, 25, sf::Color(95, 105, 120));      // top block
+    box(w, TOWER_X, 230, 200, 320, sf::Color(112, 122, 138));         // steel body
+    box(w, TOWER_X, 230, 8, 320, sf::Color(85, 95, 110));             // darker left edge
+    for (int r = 0; r < 6; r++)                                       // window grid: 6 rows x 5 columns
+        for (int c = 0; c < 5; c++)
+            box(w, TOWER_X + 18 + c * 36, 250 + r * 48, 22, 30,
+                (r + c) % 3 == 0 ? sf::Color(255, 235, 150) : sf::Color(170, 215, 240));
+}
+void plane(sf::RenderWindow& w, float x, float y) {                   // (x, y) = tip of the nose
+    sf::Color body(235, 235, 245), red(200, 40, 40), blue(90, 160, 215);
+    float fin[]  = {x - 125, y - 12, x - 140, y - 48, x - 112, y - 48, x - 90, y - 12};
+    float nose[] = {x - 25, y - 12, x, y, x - 25, y + 12};
+    float wing[] = {x - 85, y + 8, x - 50, y + 8, x - 85, y + 45, x - 115, y + 45};
+    poly(w, 4, fin, red);
+    box(w, x - 130, y - 12, 105, 24, body);                           // fuselage
+    poly(w, 3, nose, body);
+    box(w, x - 130, y + 2, 105, 5, red);                              // stripe
+    for (int i = 0; i < 5; i++) ball(w, x - 115 + i * 16, y - 4, 4, blue);   // windows
+    poly(w, 4, wing, sf::Color(175, 185, 205));
+    box(w, x - 95, y + 26, 30, 10, sf::Color(70, 80, 100));           // engine
+}
+
+// title: sine wave ka use kiya tou move words up and down
+void title(sf::RenderWindow& w, sf::Font& font, float t0) {
+    const char* words[4] = {"ESCAPE", "THE", "TWIN", "TOWERS"};
+    float width[4], total = 3 * 20;                                   // 20 px gap between words
+    for (int i = 0; i < 4; i++) {
+        sf::Text s(font, words[i], 44);
+        width[i] = s.getLocalBounds().size.x;
+        total += width[i];
+    }
+    float x = (1000 - total) / 2;                                     // centred on the screen
+    for (int i = 0; i < 4; i++) {
+        float t = t0 - i * 0.25f;                                     // this word's own timer
+        float dy = (t > 0 && t < 0.8f) ? 25 * std::sin(6.2832f * t / 0.8f) : 0;
+        sf::Text s(font, words[i], 44);
+        s.setFillColor(sf::Color(25, 20, 110));                       // deep navy / indigo
+        s.setOutlineColor(sf::Color::White);
+        s.setOutlineThickness(3);
+        s.setPosition({x, 100 - dy});
+        w.draw(s);
+        x += width[i] + 20;
+    }
+}
+
+
+// BACKGROUND START  // takke screen achi lagay
+
+// Layers from back to front:  sky gradient se stars se sun/moon se far clouds se far city se near city
+//                             se near clouds se scrolling ground se rain  se  speed streaks
+
+// THE CHANGING SKY: the five "looks" below (DAY, SUNSET, STORM, NIGHT, DAWN) are blended smoothly.
+// Every 200 points the difficulty tier goes up by one and the sky moves on to the next look.
+struct Look {
+    sf::Color top, bottom, farC, nearC, cloud, ground, body;   // sky top/bottom, far/near city, clouds, ground, sun or moon
+    float bodyY, bodyA;                                        // height of the sun/moon, and how visible it is (0-255)
+    float night;                                               // 0 = bright, 1 = dark (windows light up, obstacles get lighter)
+    float rain, stars;                                         // 0 = none, 1 = full
+};
+const Look PAL[5] = {
+    // top                  bottom                 far city               near city              clouds                 ground                 sun/moon               y    a   night  rain stars
+    {sf::Color(95,175,230), sf::Color(200,235,250), sf::Color(165,195,220), sf::Color(135,165,195), sf::Color(255,255,255), sf::Color(90,170,90),  sf::Color(255,245,190), 90,  255, 0.0f,  0,   0},   // DAY
+    {sf::Color(105,90,165), sf::Color(255,170,100), sf::Color(165,110,140), sf::Color(125,85,120),  sf::Color(255,205,170), sf::Color(115,150,75), sf::Color(255,160,80),  330, 255, 0.3f,  0,   0},   // SUNSET
+    {sf::Color(65,75,95),   sf::Color(135,145,160), sf::Color(105,115,130), sf::Color(85,95,110),   sf::Color(120,125,140), sf::Color(65,105,75),  sf::Color(170,180,190), 200, 0,   0.45f, 1,   0},   // STORM
+    {sf::Color(8,12,40),    sf::Color(38,52,100),   sf::Color(32,42,78),    sf::Color(22,30,60),    sf::Color(80,90,130),   sf::Color(30,70,60),   sf::Color(235,240,255), 90,  255, 1.0f,  0,   1},   // NIGHT
+    {sf::Color(115,135,210),sf::Color(255,205,175), sf::Color(185,165,200), sf::Color(160,140,178), sf::Color(255,225,215), sf::Color(100,160,95), sf::Color(255,205,150), 340, 255, 0.3f,  0,   0}    // DAWN
+};
+Look look = PAL[0];                              // the look being drawn right now (a blend of two entries of PAL)
+float phaseF = 0, phaseTarget = 0;               // phaseF slowly follows phaseTarget (= the difficulty tier)
+
+struct Skyline { float x[30], w[30], h[30]; float total, offset, speed; sf::Color col; };
+Skyline farCity, nearCity;                       // two rows of buildings that scroll at different speeds (parallax)
+const int NC = 10;                               // 10 clouds: 0..4 are far/small/slow, 5..9 are near/big/faster
+float cloudX[NC], cloudY[NC], cloudS[NC], cloudV[NC];
+const int NS = 14;                               // 14 white speed streaks that fly past
+float stX[NS], stY[NS], stL[NS];
+const int NR = 70, NSTAR = 50;                   // 70 rain drops, 50 stars
+float rainX[NR], rainY[NR], starX[NSTAR], starY[NSTAR];
+float groundOff = 0, bgTime = 0;                 // how far the ground pattern has scrolled, seconds since start
+
+void buildSkyline(Skyline& s, float minH, float maxH, float speed, sf::Color col) {
+    s.total = 0;  s.offset = 0;  s.speed = speed;  s.col = col;
+    for (int i = 0; i < 30; i++) {               // random buildings placed side by side
+        s.w[i] = rnd(40, 90);
+        s.h[i] = rnd(minH, maxH);
+        s.x[i] = s.total;
+        s.total += s.w[i];
+    }
+}
+void initBackground() {                          // call once, after srand()
+    buildSkyline(farCity, 90, 210, 14, sf::Color(165, 195, 220));
+    buildSkyline(nearCity, 40, 130, 30, sf::Color(135, 165, 195));
+    for (int i = 0; i < NC; i++) {
+        bool isFar = i < 5;
+        cloudX[i] = rnd(0, 1000);
+        cloudY[i] = isFar ? rnd(40, 300) : rnd(60, 470);
+        cloudS[i] = isFar ? rnd(0.5f, 0.8f) : rnd(0.9f, 1.4f);
+        cloudV[i] = isFar ? rnd(5, 10) : rnd(14, 26);
+    }
+    for (int i = 0; i < NS; i++) { stX[i] = rnd(0, 1000); stY[i] = rnd(30, 520); stL[i] = rnd(30, 90); }
+    for (int i = 0; i < NR; i++) { rainX[i] = rnd(0, 1100); rainY[i] = rnd(0, 600); }
+    for (int i = 0; i < NSTAR; i++) { starX[i] = rnd(0, 1000); starY[i] = rnd(10, 330); }
+    look = PAL[0];
+}
+// mult = how fast the world moves: 1 = normal, 0 = frozen (pause), 0.5 = calm (menu)
+void updateBackground(float dt, float mult) {
+    bgTime += dt;
+    //  the sky follows the difficulty tier: blend PAL[i] -> PAL[i + 1] 
+    phaseF += (phaseTarget - phaseF) * std::min(1.f, dt * 1.2f);   // slow, smooth change (takes about 2 seconds)
+    int i = (int)phaseF % 5, j = (i + 1) % 5;                      // current look and the next one
+    float t = phaseF - (int)phaseF;                                // 0 = fully PAL[i], 1 = fully PAL[j]
+    look.top = mix(PAL[i].top, PAL[j].top, t);        look.bottom = mix(PAL[i].bottom, PAL[j].bottom, t);
+    look.farC = mix(PAL[i].farC, PAL[j].farC, t);     look.nearC = mix(PAL[i].nearC, PAL[j].nearC, t);
+    look.cloud = mix(PAL[i].cloud, PAL[j].cloud, t);  look.ground = mix(PAL[i].ground, PAL[j].ground, t);
+    look.body = mix(PAL[i].body, PAL[j].body, t);
+    look.bodyY = fl(PAL[i].bodyY, PAL[j].bodyY, t);   look.bodyA = fl(PAL[i].bodyA, PAL[j].bodyA, t);
+    look.night = fl(PAL[i].night, PAL[j].night, t);
+    look.rain = fl(PAL[i].rain, PAL[j].rain, t);      look.stars = fl(PAL[i].stars, PAL[j].stars, t);
+
+    farCity.offset = std::fmod(farCity.offset + farCity.speed * mult * dt, farCity.total);
+    nearCity.offset = std::fmod(nearCity.offset + nearCity.speed * mult * dt, nearCity.total);
+    groundOff = std::fmod(groundOff + 250 * mult * dt, 1400.f);
+    for (int k = 0; k < NC; k++) {
+        cloudX[k] -= cloudV[k] * mult * dt;
+        if (cloudX[k] < -150 * cloudS[k]) {      // left the screen -> come back on the right at a new height
+            cloudX[k] = 1050 + rnd(0, 200);
+            cloudY[k] = k < 5 ? rnd(40, 300) : rnd(60, 470);
+        }
+    }
+    for (int k = 0; k < NS; k++) {
+        stX[k] -= 500 * mult * dt;
+        if (stX[k] + stL[k] < 0) { stX[k] = 1000 + rnd(0, 300); stY[k] = rnd(30, 520); }
+    }
+    for (int k = 0; k < NR; k++) {               // rain falls down and a little to the left
+        rainY[k] += 650 * mult * dt;
+        rainX[k] -= 100 * mult * dt;
+        if (rainY[k] > 600) { rainY[k] = -20; rainX[k] = rnd(0, 1100); }
+    }
+}
+void drawSkyline(sf::RenderWindow& w, const Skyline& s) {
+    for (int pass = 0; pass < 2; pass++)         // drawn twice, side by side, so it wraps around seamlessly
+        for (int i = 0; i < 30; i++) {
+            float bx = s.x[i] + pass * s.total - s.offset;
+            if (bx > 1000 || bx + s.w[i] < 0) continue;      // off screen: skip
+            box(w, bx, GROUND_Y - s.h[i], s.w[i] + 1, s.h[i], s.col);
+        }
+}
+void drawGround(sf::RenderWindow& w) {
+    sf::Color g = look.ground;
+    box(w, 0, GROUND_Y, 1000, 50, g);
+    box(w, 0, GROUND_Y, 1000, 6, mix(g, sf::Color::White, 0.2f));      // lighter grass edge
+    for (int i = 0; i < 20; i++) {                                     // stripes and bushes scroll left
+        float x = std::fmod(i * 70.f - groundOff, 1400.f);
+        if (x < 0) x += 1400.f;
+        x -= 70;
+        box(w, x, GROUND_Y + 6, 34, 44, mix(g, sf::Color(0, 0, 0), 0.12f));
+        if (i % 3 == 0) ball(w, x + 20, GROUND_Y, 15, mix(g, sf::Color(0, 0, 0), 0.28f));
+    }
+}
+void drawBackground(sf::RenderWindow& w, bool streaksOn) {
+    for (int i = 0; i < 12; i++) box(w, 0, i * 50.f, 1000, 51, mix(look.top, look.bottom, i / 11.f));   // sky gradient
+    if (look.stars > 0.02f)                                            // twinkling stars (night)
+        for (int i = 0; i < NSTAR; i++) {
+            float a = look.stars * (150 + 100 * std::sin(bgTime * 3 + i));
+            box(w, starX[i], starY[i], 2, 2, sf::Color(255, 255, 255, (int)a));
+        }
+    if (look.bodyA > 1) {                                              // sun (day, sunset, dawn) or moon (night)
+        sf::Color glow = look.body, core = mix(look.body, sf::Color::White, 0.5f), mid = look.body;
+        glow.a = (int)(60 * look.bodyA / 255);  mid.a = (int)look.bodyA;  core.a = (int)look.bodyA;
+        ball(w, 880, look.bodyY, 78, glow);
+        ball(w, 880, look.bodyY, 52, mid);
+        ball(w, 880, look.bodyY, 38, core);
+    }
+    sf::Color farCloud(look.cloud.r, look.cloud.g, look.cloud.b, 200);
+    for (int i = 0; i < 5; i++) cloud(w, cloudX[i], cloudY[i], cloudS[i], farCloud);
+    farCity.col = look.farC;  nearCity.col = look.nearC;
+    drawSkyline(w, farCity);
+    drawSkyline(w, nearCity);
+    for (int i = 5; i < NC; i++) cloud(w, cloudX[i], cloudY[i], cloudS[i], look.cloud);
+    drawGround(w);
+    if (look.rain > 0.05f)                                             // rain (storm)
+        for (int i = 0; i < NR; i++) box(w, rainX[i], rainY[i], 2, 18, sf::Color(220, 230, 255, (int)(look.rain * 130)));
+    if (streaksOn)
+        for (int i = 0; i < NS; i++) box(w, stX[i], stY[i], stL[i], 2, sf::Color(255, 255, 255, 90));
+}
+// ###########################################################################
+// BACKGROUND END
+// ###########################################################################
+
+bool touches(const sf::FloatRect& a, const sf::FloatRect& b) { return a.findIntersection(b).has_value(); }
+
+
+// OBSTACLES START   (everything about obstacles lives between this line and "OBSTACLES END")
+
+// Nine kinds of obstacle share ONE struct and ONE vector, so adding a new kind later is easy.
+//
+//  OBSTACLE ENTRY MAP: where each obstacle ENTERS the screen -
+//  tier = score / 200  (tier 0 = first 200 points, tier 1 = 200..399, ...). The spawn code is in updateObstacles(),
+//  each entry point is marked with  ">>> ENTERS HERE".  The "level >= n" test in that code is the tier it unlocks at.
+//
+//   kind     name                  ENTERS from ...                                          tier
+//   O_TOWER  ground tower          RIGHT edge, standing on the ground                        0+
+//   O_CLOUD  black storm cloud     TOP edge (above the screen), falls while drifting left   0+
+//   O_WIND   wind zone             RIGHT edge, a box of air that pushes the plane up/down      0+
+//   O_BIRD   single bird           RIGHT edge, flies faster than the world                     1+
+//   O_GATE   sliding-gap tower     RIGHT edge, top + bottom block, the gap slides up/down       1+
+//   O_BIRD   bird FLOCK (V shape)  RIGHT edge, 3-5 birds one behind the other               2+
+//   O_BOLT   lightning strike      TOP edge (yellow warning line first), fixed on screen     2+
+//   O_CRANE  swinging crane        TOP edge, hangs from the sky, a crate swings like a         3+
+//                                  pendulum (only the crate hurts, the rope does not)
+//   O_DRONE  bobbing drone         RIGHT edge, flies fast and moves up/down in a wave     
+// -------------------------------------------------------------------------------------------
+enum ObType { O_TOWER, O_CLOUD, O_BIRD, O_BOLT, O_WIND, O_GATE, O_CRANE, O_DRONE };
+struct Obstacle {
+    ObType type;
+    float x, y, w, h;      // top-left corner and size of the obstacle's box
+    float vx, vy;          // EXTRA speed on top of the world scrolling (pixels per second)
+    float timer;           // seconds since it was created (used for animation and movement)
+    float dir;             // wind only: +1 pushes down, -1 pushes up
+    float a;               // spare number:  drone = base height,  gate = centre of the gap,  crane = swing phase
+    bool scrolls;          // true = moves left with the world, false = stays at the same x on screen
+    bool passed;           // already counted for the score? (makes scoring happen once)
+};
+std::vector<Obstacle> obs;                                         // every obstacle currently alive
+float tTower, tCloud, tBird, tWind, tBolt, tGate, tCrane, tDrone;  // countdowns (seconds) until the next spawn of each kind
+float quietTime, sinceTower;                                       // quietTime: pause after a special obstacle; sinceTower: seconds since the last ground tower
+
+void addObstacle(ObType t, float x, float y, float w, float h, float vx, float vy, bool scrolls, float dir = 0, float a = 0) {
+    obs.push_back({t, x, y, w, h, vx, vy, 0.f, dir, a, scrolls, false});
+}
+void resetObstacles() {                                            // called at the start of every run
+    obs.clear();
+    tTower = 0.8f;  tCloud = 3.f;  tBird = 6.f;  tWind = 5.f;  tBolt = 8.f;  tGate = 5.f;  tCrane = 9.f;  tDrone = 7.f;
+    quietTime = 0;  sinceTower = 5;
+}
+void calmTowers(float t) { if (tTower < t) tTower = t; }          // keep ground towers away for t seconds after a special obstacle
+
+// Position of the swinging crate. o.h = rope length, o.a = swing phase. Returns the rope angle (0 = straight down).
+float cranePos(const Obstacle& o, float& cx, float& cy) {
+    float ang = 0.8f * std::sin(o.timer * 1.8f + o.a);
+    cx = o.x + o.w / 2 + o.h * std::sin(ang);
+    cy = o.h * std::cos(ang);
+    return ang;
+}
+
+// Called once per frame while playing.  dt = frame time, scroll = world speed, level = difficulty tier
+void updateObstacles(float dt, float scroll, int level) {
+    float k = std::max(0.5f, 1.f - 0.07f * level);                 // waits between spawns shrink as the tier rises
+
+    // ---- 1) SPAWNING: count down each timer; at zero create the obstacle and restart the timer ----
+    tTower -= dt;  tCloud -= dt;  tBird -= dt;  tWind -= dt;  tBolt -= dt;
+    tGate -= dt;  tCrane -= dt;  tDrone -= dt;  quietTime -= dt;  sinceTower += dt;
+
+    if (tTower <= 0) {
+        // >>> ENTERS HERE (O_TOWER): ground tower appears at the RIGHT edge (x = 1050) standing on the ground
+        float h = rnd(130, 330);
+        addObstacle(O_TOWER, 1050, GROUND_Y - h, TOWER_W, h, 0, 0, true);
+        tTower = rnd(1.3f, 2.3f) * k;  sinceTower = 0;
+    }
+    if (tWind <= 0) {
+        // >>> ENTERS HERE (O_WIND): wind zone appears at the RIGHT edge, random height, random direction (up or down)
+        addObstacle(O_WIND, 1050, rnd(60, 330), 260, 170, 0, 0, true, rnd(0, 1) < 0.5f ? -1.f : 1.f);
+        tWind = rnd(7, 11);
+    }
+    if (quietTime <= 0) {                                          // only ONE special obstacle spawns at a time
+        // (the rare kinds are checked first so the common ones can never "starve" them)
+        if (level >= 3 && tCrane <= 0 && sinceTower > 1.4f) {
+            // >>> ENTERS HERE (O_CRANE, tier 3+): crane hangs from the TOP edge; o.h = rope length, a = random swing phase
+            float len = rnd(180, 330);
+            addObstacle(O_CRANE, 1050 - len, 0, 2 * len + 70, len, 0, 0, true, 0, rnd(0, 6.28f));
+            tCrane = rnd(9, 14) * k;  quietTime = 1.2f;  calmTowers(2.5f);
+        } else if (level >= 1 && tGate <= 0 && sinceTower > 1.4f) {
+            // >>> ENTERS HERE (O_GATE, tier 1+): sliding-gap tower appears at the RIGHT edge; a = middle of the gap
+            float gapH = std::max(150.f, 205.f - level * 6);
+            addObstacle(O_GATE, 1050, 0, TOWER_W, gapH, 0, 0, true, 0, rnd(210, 340));
+            tGate = rnd(7, 11) * k;  quietTime = 1.0f;  calmTowers(2.0f);
+        } else if (level >= 2 && tBolt <= 0) {
+            // >>> ENTERS HERE (O_BOLT, tier 2+): lightning starts at the TOP; it does not scroll: warning line, then strike
+            addObstacle(O_BOLT, rnd(380, 900), 80, 60, GROUND_Y - 80, 0, 0, false);
+            tBolt = rnd(5, 8) * k;  quietTime = 1.2f;
+        } else if (level >= 3 && tDrone <= 0) {
+            // >>> ENTERS HERE (O_DRONE, tier 3+): drone appears at the RIGHT edge; a = the height it bobs around
+            addObstacle(O_DRONE, 1050, 0, 46, 22, -150, 0, true, 0, rnd(150, 420));
+            tDrone = rnd(5, 8) * k;  quietTime = 1.0f;  calmTowers(1.2f);
+        } else if (level >= 1 && tBird <= 0) {
+            float y0 = rnd(150, 420);
+            if (level >= 2 && rnd(0, 1) < 0.5f) {
+                // >>> ENTERS HERE (O_BIRD FLOCK, tier 2+): 3-5 birds appear at the RIGHT edge, one behind the other (V shape)
+                int n = 3 + rand() % 3;
+                for (int i = 0; i < n; i++) {
+                    float off = ((i + 1) / 2) * 30.f * (i % 2 ? 1.f : -1.f);      // 0, +30, -30, +60, -60
+                    addObstacle(O_BIRD, 1050 + i * 50, y0 + off, 40, 20, -180, 0, true);
+                    if (i > 0) obs.back().passed = true;                          // only the leader gives +10 points
+                }
+                calmTowers(1.8f);
+            } else {
+                // >>> ENTERS HERE (O_BIRD, tier 1+): one bird appears at the RIGHT edge, random height
+                addObstacle(O_BIRD, 1050, rnd(80, 480), 40, 20, -180, 0, true);
+            }
+            tBird = rnd(4, 7) * k;  quietTime = 0.9f;
+        } else if (tCloud <= 0) {
+            // >>> ENTERS HERE , black storm cloud starts ABOVE the screen (y < 0) and falls down
+            float s = rnd(1.0f, 1.5f);
+            addObstacle(O_CLOUD, rnd(1050, 1250), -90 * s, 120 * s, 70 * s, 0, rnd(110, 190) + level * 10, true);
+            tCloud = rnd(2.2f, 3.6f) * k;  quietTime = 0.9f;
+        }
+    }
+
+    //  MOVING, SCORING and DELETING 
+    for (std::size_t i = 0; i < obs.size();) {
+        Obstacle& o = obs[i];
+        o.timer += dt;
+        o.x += ((o.scrolls ? -scroll : 0.f) + o.vx) * dt;
+        o.y += o.vy * dt;
+        if (o.type == O_DRONE) o.y = o.a + 80 * std::sin(o.timer * 2.6f);                  // hilne wali wavess
+        if (o.type == O_GATE) o.y = o.a + 70 * std::sin(o.timer * 1.7f) - o.h / 2;         // gap slides up and down
+
+        bool gone = o.x + o.w < -20                                // left the screen
+                 || o.y > GROUND_Y                                 // a falling cloud reached the ground
+                 || (o.type == O_BOLT && o.timer > 1.5f);          // lightning finished
+        bool behind = o.type != O_BOLT && o.x + o.w < pX - 125;    // completely behind the plane's tail
+        if ((behind || gone) && !o.passed && o.type != O_WIND) { o.passed = true; score += 10; }   // +10, once
+        if (gone) obs.erase(obs.begin() + i); else i++;
+    }
+}
+
+// The part of an obstacle that actually hurts. Slightly smaller than the drawing so crashes feel fair.
+sf::FloatRect obstacleBox(const Obstacle& o) {
+    float cx = 0, cy = 0;
+    switch (o.type) {
+        case O_CLOUD: return sf::FloatRect({o.x + 14, o.y + 18}, {o.w - 28, o.h - 28});
+        case O_BIRD:  return sf::FloatRect({o.x + 4, o.y + 3}, {o.w - 8, o.h - 6});
+        case O_DRONE: return sf::FloatRect({o.x + 4, o.y + 3}, {o.w - 8, o.h - 6});
+        case O_BOLT:  return sf::FloatRect({o.x, o.y}, {o.w, o.h});
+        case O_CRANE: cranePos(o, cx, cy); return sf::FloatRect({cx - 22, cy - 22}, {44, 44});   // only the crate hurts
+        default:      return sf::FloatRect({o.x + 3, o.y}, {o.w - 6, o.h});
+    }
+}
+// Does the rectangle r (a part of the plane) touch any deadly obstacle?
+bool obstaclesHit(const sf::FloatRect& r) {
+    for (const Obstacle& o : obs) {
+        if (o.type == O_WIND) continue;                                         // wind never kills
+        if (o.type == O_BOLT && !(o.timer > 1.2f && o.timer < 1.5f)) continue;  // lightning hurts only while striking
+        if (o.type == O_GATE) {                                                 // two blocks with a moving gap between them
+            sf::FloatRect top({o.x + 3, 0}, {o.w - 6, o.y});
+            sf::FloatRect bottom({o.x + 3, o.y + o.h}, {o.w - 6, GROUND_Y - o.y - o.h});
+            if (touches(r, top) || touches(r, bottom)) return true;
+            continue;
+        }
+        if (touches(r, obstacleBox(o))) return true;
+    }
+    return false;
+}
+// Vertical push (pixels per second) from the wind zones that rectangle r is inside of
+float windAt(const sf::FloatRect& r) {
+    float push = 0;
+    for (const Obstacle& o : obs)
+        if (o.type == O_WIND && touches(r, sf::FloatRect({o.x, o.y}, {o.w, o.h}))) push += o.dir * 230;
+    return push;
+}
+
+//  drawing the obstacles 
+sf::Color windowColor(int r, int c) {                                 // more windows light up when it gets dark
+    bool lit = (r + c) % 3 == 0 || (look.night > 0.5f && (r * 2 + c) % 2 == 0);
+    return lit ? sf::Color(255, 235, 150) : mix(sf::Color(170, 215, 240), sf::Color(40, 55, 90), look.night);
+}
+void drawBlock(sf::RenderWindow& w, float x, float y, float h) {      // a steel tower blockment
+    box(w, x, y, TOWER_W, h, sf::Color(112, 122, 138));
+    box(w, x, y, 6, h, sf::Color(85, 95, 110));                           // darker left edge
+    for (int r = 0; 14 + r * 40 + 24 < h; r++)                            // window 
+        for (int c = 0; c < 3; c++) box(w, x + 14 + c * 26, y + 14 + r * 40, 16, 24, windowColor(r, c));
+}
+void drawGroundTower(sf::RenderWindow& w, float x, float y, float h) {
+    drawBlock(w, x, y, h);
+    box(w, x - 4, y - 8, TOWER_W + 8, 10, sf::Color(95, 105, 120));       // roof
+    box(w, x + TOWER_W / 2 - 2, y - 30, 4, 22, sf::Color(70, 75, 85));    // antenna
+}
+void drawGate(sf::RenderWindow& w, const Obstacle& o) {
+    drawBlock(w, o.x, 0, o.y);                                            // top block hangs from the sky
+    drawBlock(w, o.x, o.y + o.h, GROUND_Y - o.y - o.h);                   // bottom block stands on the ground
+    sf::Color warn(255, 200, 30);
+    box(w, o.x - 4, o.y - 8, TOWER_W + 8, 8, warn);                       // yellow caps mark the moving gap
+    box(w, o.x - 4, o.y + o.h, TOWER_W + 8, 8, warn);
+}
+void drawStormCloud(sf::RenderWindow& w, const Obstacle& o) {
+    float s = o.w / 120.f;                                                // cloud sizeee
+    sf::Color rim = mix(sf::Color(90, 90, 110), sf::Color(200, 205, 230), look.night);   // ye dark lighting ko accomodate krne keliye
+    cloud(w, o.x - 3, o.y + o.h + 3, s * 1.05f, rim);
+    cloud(w, o.x, o.y + o.h, s, mix(sf::Color(38, 38, 50), sf::Color(105, 110, 150), look.night));                    // dark body
+    cloud(w, o.x + 0.12f * o.w, o.y + o.h - 4, s * 0.75f, mix(sf::Color(58, 58, 74), sf::Color(130, 135, 170), look.night));   // lighter middle
+}
+void drawBird(sf::RenderWindow& w, const Obstacle& o) {
+    float cx = o.x + o.w / 2, cy = o.y + o.h / 2;
+    float flap = std::sin(o.timer * 16) * 14;                             // wing goes up and down
+    float wing[] = {cx - 8, cy, cx + 8, cy, cx + 2, cy - flap};
+    float tail[] = {cx + 6, cy - 2, cx + 20, cy + 2, cx + 6, cy + 4};
+    float beak[] = {cx - 14, cy - 5, cx - 22, cy - 2, cx - 14, cy};
+    sf::Color dark = mix(sf::Color(25, 25, 30), sf::Color(215, 220, 235), look.night);   // adjustment of bird lightening 
+    poly(w, 3, wing, dark);
+    poly(w, 3, tail, dark);
+    ball(w, cx, cy, 8, dark);                                             // body
+    ball(w, cx - 10, cy - 3, 5, dark);                                    // head
+    poly(w, 3, beak, sf::Color(240, 160, 30));
+}
+void drawBolt(sf::RenderWindow& w, const Obstacle& o) {
+    float cx = o.x + o.w / 2;
+    cloud(w, cx - 90, 100, 1.5f, mix(sf::Color(40, 40, 52), sf::Color(105, 110, 150), look.night));   // the storm cloud it comes from
+    if (o.timer < 1.2f) {                                                 // WARNING: flashing dashed yellow line
+        int a = (int)(90 + 120 * (0.5f + 0.5f * std::sin(o.timer * 18)));
+        for (float yy = 105; yy < GROUND_Y; yy += 34) box(w, cx - 3, yy, 6, 18, sf::Color(255, 230, 60, a));
+    } else {                                                              // STRIKE: zigzag bolt from cloud to ground
+        float x0 = cx, y0 = 100;
+        for (int k = 1; y0 < GROUND_Y; k++) {
+            float x1 = cx + ((k % 2) ? 18.f : -18.f), y1 = std::min(y0 + 55.f, GROUND_Y);
+            float outer[] = {x0 - 9, y0, x0 + 9, y0, x1 + 9, y1, x1 - 9, y1};
+            float inner[] = {x0 - 3, y0, x0 + 3, y0, x1 + 3, y1, x1 - 3, y1};
+            poly(w, 4, outer, sf::Color(255, 230, 60, 200));
+            poly(w, 4, inner, sf::Color::White);
+            x0 = x1;  y0 = y1;
+        }
+        box(w, 0, 0, 1000, 600, sf::Color(255, 255, 255, 60));            // whole screen flashes
+    }
+}
+void drawCrane(sf::RenderWindow& w, const Obstacle& o) {
+    float cx = 0, cy = 0;
+    float ang = cranePos(o, cx, cy);
+    float ax = o.x + o.w / 2;                                             // where the rope is fixed (top of the screen)
+    sf::RectangleShape rope({3.f, o.h});                                  // the rope is a thin rectangle that swings
+    rope.setOrigin({1.5f, 0.f});
+    rope.setPosition({ax, 0.f});
+    rope.setRotation(sf::radians(-ang));
+    rope.setFillColor(mix(sf::Color(60, 60, 70), sf::Color(210, 215, 230), look.night));
+    w.draw(rope);
+    box(w, ax - 16, 0, 32, 10, sf::Color(90, 95, 110));                   
+    sf::Color wood(150, 80, 20);
+    box(w, cx - 28, cy - 28, 56, 56, sf::Color(220, 130, 40));            // cargo crate (this is the deadly part)
+    box(w, cx - 28, cy - 28, 56, 7, wood);
+    box(w, cx - 28, cy + 21, 56, 7, wood);
+    box(w, cx - 3, cy - 28, 6, 56, wood);
+}
+void drawDrone(sf::RenderWindow& w, const Obstacle& o) {
+    float cx = o.x + o.w / 2;
+    sf::Color dark = mix(sf::Color(45, 50, 60), sf::Color(200, 205, 225), look.night);
+    box(w, o.x, o.y + 8, o.w, 14, dark);                                  // body
+    box(w, cx - 3, o.y + 2, 6, 8, dark);                                  // mast
+    float span = ((int)(o.timer * 30) % 2) ? 50.f : 36.f;                 // rotor blur flickers between two widths
+    box(w, cx - span / 2, o.y, span, 3, dark);
+    ball(w, cx, o.y + 15, 3.5f, ((int)(o.timer * 5) % 2) ? sf::Color(255, 40, 40) : sf::Color(120, 20, 20));   // blinking light
+}
+void drawWind(sf::RenderWindow& w, const Obstacle& o) {
+    box(w, o.x, o.y, o.w, o.h, sf::Color(255, 255, 255, 38));             // faint white zone
+    box(w, o.x, o.y, o.w, 3, sf::Color(255, 255, 255, 120));              // top edge
+    box(w, o.x, o.y + o.h - 3, o.w, 3, sf::Color(255, 255, 255, 120));    // bottom edge
+    for (int k = 0; k < 5; k++) {                                         // streaks travel in the wind's direction
+        float sxk = o.x + 30 + k * 48;
+        float off = std::fmod(o.timer * 140 + k * 37, o.h - 28);
+        float syk = (o.dir > 0) ? o.y + 14 + off : o.y + o.h - 14 - off;
+        box(w, sxk, syk - 14, 4, 28, sf::Color(255, 255, 255, 190));
+    }
+}
+void drawObstacles(sf::RenderWindow& w) {
+    for (const Obstacle& o : obs) if (o.type == O_WIND) drawWind(w, o);   // wind first  so it is behind everything
+    for (const Obstacle& o : obs) {
+        if (o.type == O_TOWER) drawGroundTower(w, o.x, o.y, o.h);
+        else if (o.type == O_GATE) drawGate(w, o);
+        else if (o.type == O_CLOUD) drawStormCloud(w, o);
+        else if (o.type == O_BIRD) drawBird(w, o);
+        else if (o.type == O_DRONE) drawDrone(w, o);
+        else if (o.type == O_CRANE) drawCrane(w, o);
+        else if (o.type == O_BOLT) drawBolt(w, o);
+    }
+}
+// 
+// OBSTACLES END
+// 
+
+// best.txt is saved next to the program's working folder (same as before)
+int loadBest() { std::ifstream f("best.txt"); int b = 0; f >> b; return b; }
+void saveBest() { std::ofstream f("best.txt"); f << best; }
+
+void startGame() {                                                    // fresh run: call on Play / Retry / Restart
+    score = 0;  scrollSpeed = 250;  hitFlash = 0;
+    pX = 300;  pY = 280;
+    lastLevel = 0;  bannerTime = 3;                                   // shows "TIER 1 - DAY" at the start
+    phaseF = 0;  phaseTarget = 0;                                     // sky starts as DAY
+    resetObstacles();
+}
+
+int main() {
+    srand((unsigned)time(0));
+    initBackground();
+    sf::RenderWindow window(sf::VideoMode({1000u, 600u}), "Escape The Twin Towers");
+    window.setFramerateLimit(60);
+
+    //  font: font.ttf if present, otherwise a system font (no error messages either way) ----
+    sf::Font font;
+    if (!loadFont(font)) {
+        std::cout << "No font found!  Fix: copy any .ttf file next to f.cpp and name it font.ttf,\n"
+                     "or run:  sudo apt install fonts-dejavu-core\n";
+        return 1;
+    }
+
+    //  music is optional:
+    // The Music object is only created when a music file really exists, so a missing file prints nothing at all.
+    std::unique_ptr<sf::Music> music;
+    std::string musicPath = findMusic();
+    if (!musicPath.empty()) {
+        music = std::make_unique<sf::Music>();
+        if (music->openFromFile(musicPath)) { music->setLooping(true); music->setVolume(40); }
+        else music.reset();                                           // file exists but is unreadable , play without music
+    }
+    bool muted = false;
+    best = loadBest();
+
+    State state = NOTICE;
+    float noseX = -20, boomTime = 0, menuTime = 0, smokeTimer = 0;
+    bool crashed = false;
+    sf::Clock clock;
+    using K = sf::Keyboard::Key;
+
+    auto begin = [&]() {                                              // start a run
+        startGame();
+        state = PLAYING;
+        if (music) music->play();
+    };
+
+    while (window.isOpen()) {
+        float dt = clock.restart().asSeconds();
+        if (dt > 0.05f) dt = 0.05f;
+        sf::Vector2f mouse = window.mapPixelToCoords(sf::Mouse::getPosition(window));
+        bool hover = mouse.x > 370 && mouse.x < 630 && mouse.y > 295 && mouse.y < 365;   // PLAY button area
+
+        //  input
+        while (const std::optional event = window.pollEvent()) {
+            if (event->is<sf::Event::Closed>()) window.close();
+            if (const auto* key = event->getIf<sf::Event::KeyPressed>()) {
+                K k = key->code;
+                if (state == NOTICE && k == K::Enter) state = INTRO;
+                else if (state == INTRO && k == K::Enter) { state = MENU; menuTime = 2; }          // skip intro
+                else if (state == MENU && k == K::Enter && menuTime > 1.3f) begin();
+                else if (state == PLAYING && k == K::Escape) state = PAUSED;
+                else if (state == PAUSED) {
+                    if (k == K::Escape) state = PLAYING;
+                    else if (k == K::R) begin();
+                    else if (k == K::Backspace) { state = MENU; menuTime = 2; }
+                }
+                else if (state == GAMEOVER) {
+                    if (k == K::R) begin();
+                    else if (k == K::Escape) { state = MENU; menuTime = 2; }
+                }
+                if (k == K::M) { muted = !muted; if (music) music->setVolume(muted ? 0.f : 40.f); }
+            }
+            if (event->getIf<sf::Event::MouseButtonPressed>())
+                if (state == MENU && menuTime > 1.3f && hover) begin();
+        }
+
+        // update 
+        // the background moves with the world: normal speed while playing, frozen when paused, calm in menus
+        float bg = 0.5f;
+        if (state == PLAYING) bg = scrollSpeed / 250.f;
+        else if (state == PAUSED) bg = 0;
+        else if (state == GAMEOVER) bg = 0.15f;
+        // the sky follows the difficulty tier (menus always show DAY)
+        if (state == NOTICE || state == INTRO || state == MENU) { phaseF = 0; phaseTarget = 0; }
+        else if (state == PLAYING) phaseTarget = score / 200;
+        updateBackground(dt, bg);
+
+        if (state == INTRO) {
+            for (int i = 0; i < 40; i++)                              // smoke puffs fade out
+                if (slife[i] > 0) { slife[i] -= 0.8f * dt; sy[i] -= 12 * dt; }
+            for (int i = 0; i < N; i++)                               // explosion: gravity + movement
+                if (life[i] > 0) { vy[i] += 300 * dt; px[i] += vx[i] * dt; py[i] += vy[i] * dt; life[i] -= dt; }
+            if (!crashed) {
+                noseX += 300 * dt;                                    // plane flies left to right
+                smokeTimer += dt;
+                if (smokeTimer > 0.03f) {
+                    smokeTimer = 0;
+                    for (int i = 0; i < 40; i++)
+                        if (slife[i] <= 0) { sx[i] = noseX - 100; sy[i] = PLANE_Y + 30; slife[i] = 1; break; }
+                }
+                if (noseX >= TOWER_X) {
+                    noseX = TOWER_X;
+                    crashed = true;
+                    for (int i = 0; i < N; i++) {
+                        float angle = rnd(0, 6.2832f), speed = rnd(60, 400);
+                        px[i] = TOWER_X;  py[i] = PLANE_Y;
+                        vx[i] = std::cos(angle) * speed;  vy[i] = std::sin(angle) * speed;
+                        life[i] = rnd(0.8f, 1.7f);
+                    }
+                }
+            } else {
+                boomTime += dt;
+                if (boomTime >= 1.8f) { state = MENU; menuTime = 0; } // intro over -> title comes
+            }
+        } else if (state != NOTICE) menuTime += dt;
+
+        if (state == PLAYING) {
+            // difficulty tier: every 200 points = faster world + new obstacles + the next sky look
+            int level = score / 200;
+            if (level != lastLevel) { lastLevel = level; bannerTime = 3; }       // new tier -> show the banner
+            bannerTime = std::max(0.f, bannerTime - dt);
+            scrollSpeed = std::min(250.f + level * 20, 480.f);
+
+            // player movement (WASD or arrows)
+            float dx = 0, dy = 0;
+            if (sf::Keyboard::isKeyPressed(K::W) || sf::Keyboard::isKeyPressed(K::Up))    dy -= 1;
+            if (sf::Keyboard::isKeyPressed(K::S) || sf::Keyboard::isKeyPressed(K::Down))  dy += 1;
+            if (sf::Keyboard::isKeyPressed(K::A) || sf::Keyboard::isKeyPressed(K::Left))  dx -= 1;
+            if (sf::Keyboard::isKeyPressed(K::D) || sf::Keyboard::isKeyPressed(K::Right)) dx += 1;
+            pX += dx * 320 * dt;
+            pY += dy * 320 * dt;
+            pY += windAt(sf::FloatRect({pX - 125, pY - 12}, {120, 24})) * dt;   // wind zones push the plane
+            pX = std::clamp(pX, 150.f, 990.f);                                   // keep the plane on the screen
+            pY = std::clamp(pY, 50.f, 505.f);
+
+            updateObstacles(dt, scrollSpeed, level);                             //  obstacle code (spawn/move/score)
+
+            // collision: the plane has two hitboxes (body and wing), smaller than the drawing so it feels fair
+            sf::FloatRect body({pX - 125, pY - 12}, {120, 24});
+            sf::FloatRect wing({pX - 100, pY + 10}, {40, 32});
+            if (obstaclesHit(body) || obstaclesHit(wing)) {
+                state = GAMEOVER;
+                hitFlash = 1;
+                if (score > best) { best = score; saveBest(); }
+            }
+        }
+        if (state == GAMEOVER) hitFlash = std::max(0.f, hitFlash - 1.5f * dt);
+
+        //  draw 
+        drawBackground(window, state == PLAYING || state == PAUSED || state == GAMEOVER);
+        if (state == NOTICE || state == INTRO || state == MENU) tower(window);
+
+        sf::Color navy(25, 20, 110);
+        if (state == NOTICE) {
+            box(window, 100, 150, 800, 300, sf::Color(255, 255, 255, 225));
+            center(window, font, "CONTENT NOTICE", 40, 500, 200, navy);
+            center(window, font, "This game is inspired by the events of September 11, 2001.", 22, 500, 270, navy);
+            center(window, font, "It is a fictionalized obstacle-avoidance game and shows no casualties.", 22, 500, 305, navy);
+            center(window, font, "Press ENTER to continue", 26, 500, 390, sf::Color(200, 40, 40));
+        } else if (state == INTRO) {
+            for (int i = 0; i < 40; i++)
+                if (slife[i] > 0) ball(window, sx[i], sy[i], 5 + (1 - slife[i]) * 14, sf::Color(255, 255, 255, (int)(slife[i] * 200)));
+            if (!crashed || boomTime < 0.15f) plane(window, noseX, PLANE_Y);   // plane is destroyed by the blast
+            if (crashed && boomTime < 0.12f) ball(window, TOWER_X, PLANE_Y, 120, sf::Color(255, 255, 200, 220));   // flash
+            for (int i = 0; i < N; i++) {
+                if (life[i] <= 0) continue;
+                float a = life[i] > 1 ? 1 : life[i];                  // fades in the last second
+                sf::Color c = (i % 3 == 0) ? sf::Color(255, 100, 0) : (i % 3 == 1) ? sf::Color(255, 210, 0) : sf::Color(55, 55, 60);
+                c.a = (int)(a * 255);
+                ball(window, px[i], py[i], (i % 3 == 2 ? 14 : 8) * (0.4f + 0.6f * a), c);
+            }
+            if (crashed && boomTime < 1.2f) {                         // BOOM sign
+                float k = boomTime < 0.15f ? boomTime / 0.15f : 1 + 0.05f * std::sin(boomTime * 30);
+                sf::Text t(font, "BOOM!", 100);
+                t.setFillColor(sf::Color(255, 200, 0));
+                t.setOutlineColor(sf::Color(200, 30, 0));
+                t.setOutlineThickness(6);
+                sf::FloatRect b = t.getLocalBounds();
+                t.setOrigin({b.position.x + b.size.x / 2, b.position.y + b.size.y / 2});
+                t.setPosition({500, 200});
+                t.setScale({k, k});
+                window.draw(t);
+            }
+            center(window, font, "Press ENTER to skip", 18, 500, 580, navy);
+        } else if (state == MENU) {
+            title(window, font, menuTime);
+            if (menuTime > 1.3f) {                                    // PLAY button appears after the dance
+                box(window, 367, 292, 266, 76, sf::Color(25, 25, 112));                                 // border
+                box(window, 370, 295, 260, 70, hover ? sf::Color(255, 200, 40) : sf::Color(60, 70, 160));
+                center(window, font, "PLAY", 36, 500, 330, hover ? sf::Color(25, 25, 112) : sf::Color::White);
+                center(window, font, ("BEST SCORE: " + std::to_string(best)).c_str(), 24, 500, 410, navy);
+                center(window, font, "WASD / Arrows: Move    Esc: Pause    R: Restart    M: Mute", 20, 500, 450, navy);
+            }
+        } else {                                                      // PLAYING, PAUSED, GAMEOVER
+            drawObstacles(window);                                    // <-- obstacle code (drawing)
+            plane(window, pX, pY);
+            int tier = score / 200;
+            label(window, font, "SCORE: " + std::to_string(score), 28, 20, 12, navy);
+            label(window, font, "BEST: " + std::to_string(best), 22, 20, 48, navy);
+            label(window, font, "TIER " + std::to_string(tier + 1) + " - " + STAGE[tier % 5], 22, 20, 78, navy);
+            if (bannerTime > 0 && state != GAMEOVER) {                // "TIER n - NAME" banner when a new tier starts
+                int a = (int)(255 * std::min(1.f, bannerTime));
+                std::string s = "TIER " + std::to_string(tier + 1) + " - " + STAGE[tier % 5];
+                box(window, 250, 140, 500, 70, sf::Color(0, 0, 0, (int)(a * 0.45f)));
+                center(window, font, s.c_str(), 34, 500, 175, sf::Color(255, 255, 255, a));
+            }
+            if (hitFlash > 0) box(window, 0, 0, 1000, 600, sf::Color(255, 0, 0, (int)(hitFlash * 110)));
+            if (state == PAUSED) {
+                box(window, 0, 0, 1000, 600, sf::Color(255, 255, 255, 140));
+                center(window, font, "PAUSED", 60, 500, 220, navy);
+                center(window, font, "ESC: Resume    R: Restart    BACKSPACE: Main menu", 24, 500, 300, navy);
+            }
+            if (state == GAMEOVER) {
+                box(window, 0, 0, 1000, 600, sf::Color(255, 255, 255, 140));
+                center(window, font, "GAME OVER", 64, 500, 190, sf::Color(200, 40, 40));
+                center(window, font, ("Score: " + std::to_string(score) + "     Best: " + std::to_string(best)).c_str(), 32, 500, 275, navy);
+                center(window, font, "R: Retry    ESC: Main menu", 26, 500, 335, navy);
+            }
+        }
+        window.display();
+    }
+    return 0;
+}
