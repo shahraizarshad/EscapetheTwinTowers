@@ -1,0 +1,84 @@
+// intro isme update kia h old intro ko..
+const float TOWER_X = 685, PLANE_Y = 250;
+
+struct IntroState {
+    float noseX = -40, timer = 0, trailTimer = 0;
+    bool boomDone = false;
+    void reset() { noseX = -40; timer = 0; trailTimer = 0; boomDone = false; shocks.clear(); }
+};
+IntroState intro;
+
+void drawSingleHeroTower(sf::RenderWindow& w, float tx, float topY, float wd, bool spire) {
+    float ht = GROUND_Y - topY;
+    if (spire) {
+        box(w, tx + wd / 2 - 2.5f, topY - 58, 5, 58, sf::Color(115, 130, 155));
+        if ((int)(bgTime * 2.5f) % 2 == 0) ball(w, tx + wd / 2, topY - 60, 4.f, sf::Color(255, 55, 55));
+    } else {
+        box(w, tx + wd / 2 - 2, topY - 22, 4, 22, sf::Color(95, 110, 135));
+        if ((int)(bgTime * 2.5f + 1) % 2 == 0) ball(w, tx + wd / 2, topY - 24, 3.2f, sf::Color(255, 55, 55));
+    }
+    box(w, tx + 10, topY - 14, wd - 20, 14, sf::Color(55, 68, 92));
+    box(w, tx + 10, topY - 14, wd - 20, 3, sf::Color(145, 185, 225));
+    box(w, tx, topY, wd, ht, sf::Color(36, 48, 72));
+    box(w, tx, topY, 10, ht, sf::Color(22, 30, 48));
+    box(w, tx + wd - 4, topY, 4, ht, sf::Color(135, 180, 225));
+    float sheen[] = {tx + 12, topY, tx + 52, topY, tx + 12, topY + 170, tx + 12, topY + 105};
+    poly(w, 4, sheen, sf::Color(255, 255, 255, 26));
+    for (int r = 0; 14 + r * 30 + 20 < ht; r++)
+        for (int c = 0; c < 4; c++)
+            box(w, tx + 14 + c * 24, topY + 14 + r * 30, 14, 19,
+                ((r + c * 2) % 3 == 0) ? sf::Color(255, 220, 125, 220) : sf::Color(85, 145, 200, 190));
+}
+
+void tower(sf::RenderWindow& w) {
+    float sweep1 = 160 * std::sin(bgTime * 1.1f);
+    float sweep2 = 160 * std::cos(bgTime * 0.9f);
+    float beam1[] = {TOWER_X + 45,  GROUND_Y, TOWER_X - 180 + sweep1, 40, TOWER_X - 90  + sweep1, 40};
+    float beam2[] = {TOWER_X + 210, GROUND_Y, TOWER_X + 190 + sweep2, 30, TOWER_X + 280 + sweep2, 30};
+    poly(w, 3, beam1, sf::Color(130, 215, 255, 28));
+    poly(w, 3, beam2, sf::Color(255, 225, 140, 24));
+    drawSingleHeroTower(w, TOWER_X,       180, 118, true);
+    drawSingleHeroTower(w, TOWER_X + 142, 200, 118, false);
+}
+
+// Returns true when the 4-second intro finishes and is ready for MENU
+bool updateIntro(float dt) {
+    intro.timer += dt;
+    intro.noseX += 460 * dt;
+    intro.trailTimer -= dt;
+    if (intro.trailTimer <= 0 && intro.noseX < 1180) {
+        intro.trailTimer = 0.025f;
+        addPart(intro.noseX - 134, PLANE_Y + 1,  -160, rnd(-10, 10), 0.75f, 4.f, sf::Color(255, 220, 140, 180));
+        addPart(intro.noseX - 214, PLANE_Y - 54, -160, rnd(-8, 8),   0.65f, 3.f, sf::Color(210, 235, 255, 160));
+        addPart(intro.noseX - 214, PLANE_Y + 56, -160, rnd(-8, 8),   0.65f, 3.f, sf::Color(210, 235, 255, 160));
+    }
+    if (!intro.boomDone && intro.noseX >= TOWER_X + 60) {
+        intro.boomDone = true;
+        shake = 0.45f;
+        playSfx(SF_BOOST);
+        addShock(intro.noseX - 40, PLANE_Y, 175.f, sf::Color(140, 235, 255));
+        addShock(intro.noseX - 40, PLANE_Y, 110.f, sf::Color(255, 215, 90));
+    }
+    updateParticles(dt);
+    updateShocks(dt);
+    return intro.timer >= 4.0f;
+}
+
+void drawIntroWorld(sf::RenderWindow& w) {
+    drawParticles(w);
+    plane(w, intro.noseX - 80, PLANE_Y - 55, 2, -4.f, 1.8f);      // top wingman (Stealth)
+    plane(w, intro.noseX - 80, PLANE_Y + 55, 2,  4.f, 1.8f);      // bottom wingman (Stealth)
+    plane(w, intro.noseX,      PLANE_Y,      skinSel, 0.f, 2.4f); // lead jet (player skin)
+    drawShocks(w);
+}
+
+void drawIntroUI(sf::RenderWindow& w, sf::Font& font) {
+    if (intro.boomDone) {
+        float tReveal = std::min(1.f, (intro.timer - 1.5f) * 1.4f);
+        std::uint8_t a = (std::uint8_t)(std::max(0.f, tReveal) * 240);
+        panel(w, 130, 195, 740, 110, sf::Color(10, 15, 36, (std::uint8_t)(a * 0.85f)), sf::Color(70, 190, 255, a), 2.f);
+        center(w, font, "ESCAPE THE TWIN TOWERS", 44, 500, 242, sf::Color(255, 225, 110, a));
+        box(w, 240, 278, 520 * std::max(0.f, tReveal), 3, sf::Color(100, 220, 255, a));
+    }
+    label(w, font, "Press ENTER to skip", 18, 410, 565, sf::Color::White);
+}
