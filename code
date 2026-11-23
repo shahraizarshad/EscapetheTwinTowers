@@ -1,0 +1,642 @@
+
+// ESCAPE THE TWIN TOWERS -  (SFML 3)
+// Build: g++ -std=c++17 ../f.cpp -o game -lsfml-graphics -lsfml-window -lsfml-system -lsfml-audio && ALSOFT_DRIVERS=pulse ./game
+#include <SFML/Audio.hpp>
+#include <SFML/Graphics.hpp>
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <vector>
+namespace fs = std::filesystem;
+using K = sf::Keyboard::Key;
+enum State { NOTICE, INTRO, MENU, HOWTO, SHOP, SCORES, PLAYING, PAUSED, GAMEOVER };
+
+
+// CORE ENGINE, AUDIO (SFX + BUILT-IN MUSIC), SAVE DATA & SHOP
+
+const float TOWER_X = 685, PLANE_Y = 250, TOWER_W = 90, GROUND_Y = 550;
+float scrollSpeed = 250, hitFlash = 0, shake = 0, bannerTime = 0, bgTime = 0, shopMsgT = 0, comboT = 0, overdriveT = 0, camY = 0;
+float hitStop = 0, boostFx = 0, novaFlash = 0, nova = 0, runT = 0, dispScore = 0, bossHitT = 0;
+int score = 0, best = 0, lastLevel = 0, numPlayers = 1, diff = 1, themeSel = 0, coins = 0, skinSel = 0, shopSel = 0, shopTab = 0, coinsStart = 0, newRank = -1, combo = 1, lifetime = 0, flights = 0, rankBefore = 0;
+bool muted = false;
+std::string shopMsg, topNames[5] = {"ACE","ACE","ACE","ACE","ACE"}, entryName = "AAA";
+const char* STAGE[5] = {"DAY","SUNSET","STORM","NIGHT","DAWN"}, *DIFF_NAME[3] = {"EASY","NORMAL","HARD"}, *THEME_NAME[6] = {"AUTO","DAY","SUNSET","STORM","NIGHT","DAWN"};
+const int LIVES[3] = {4,3,2}, NUP = 4, UP_MAX = 3, UP_COST[UP_MAX] = {50,100,175}, RANK_AT[5] = {0,500,1500,4000,9000};
+const float BASE_SPEED[3] = {230,250,280}, DIFF_WAIT[3] = {1.3f,1.0f,0.8f};
+const char* UP_NAME[NUP] = {"ARMOR","TURBO","MISSILES","NOVA CELLS"}, *UP_DESC[NUP] = {"+1 starting heart\nper level","Boost recharges\nfaster","Missiles reload\nfaster","NOVA bomb charges\n25% faster"};
+const char* RANK_NAME[5] = {"CADET","PILOT","CAPTAIN","ACE","LEGEND"};
+int upg[NUP] = {0,0,0,0};
+float rnd(float a, float b) { return a + (b - a) * (rand() % 1001) / 1000.f; }
+int maxLives() { return LIVES[diff] + upg[0]; }
+int rankOf(int pts) { int r = 0; for (int i = 0; i < 5; i++) if (pts >= RANK_AT[i]) r = i; return r; }
+sf::Texture jetTex, enemyTex;
+std::optional<sf::Sprite> jetSpr, enemySpr;
+std::string findAsset(const std::string& name) {
+    std::error_code ec; std::vector<fs::path> dirs; fs::path cwd = fs::current_path(ec), exe = fs::read_symlink("/proc/self/exe", ec);
+    if (!ec) { dirs.push_back(cwd); dirs.push_back(cwd / "assets"); }
+    if (!exe.empty()) { fs::path d = exe.parent_path(); dirs.push_back(d); dirs.push_back(d / "assets"); dirs.push_back(d.parent_path()); dirs.push_back(d.parent_path() / "assets"); }
+    for (const fs::path& d : dirs) if (fs::is_regular_file(d / name, ec)) return (d / name).string();
+    return "";
+}
+bool loadFont(sf::Font& font) {
+    std::string mine = findAsset("font.ttf"); if (!mine.empty() && font.openFromFile(mine)) return true;
+    const char* fp[] = {"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf","/usr/share/fonts/truetype/freefont/FreeSansBold.ttf","/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf","/mnt/c/Windows/Fonts/arialbd.ttf","/mnt/c/Windows/Fonts/arial.ttf"};
+    std::error_code ec; for (const char* p : fp) if (fs::is_regular_file(p, ec) && font.openFromFile(p)) return true; return false;
+}
+std::string findMusic() { const char* nm[] = {"music.ogg","music.wav","music.mp3","music.flac"}; for (const char* n : nm) { std::string p = findAsset(n); if (!p.empty()) return p; } return ""; }
+void loadSprites() {
+    std::string jp = findAsset("jet.png"), ep = findAsset("enemy.png");
+    if (!jp.empty() && jetTex.loadFromFile(jp)) { jetTex.setSmooth(true); jetSpr.emplace(jetTex); sf::Vector2u sz = jetTex.getSize(); jetSpr->setOrigin({sz.x*0.5f, sz.y*0.5f}); jetSpr->setScale({136.f/sz.x, 86.f/sz.y}); }
+    if (!ep.empty() && enemyTex.loadFromFile(ep)) { enemyTex.setSmooth(true); enemySpr.emplace(enemyTex); sf::Vector2u sz = enemyTex.getSize(); enemySpr->setOrigin({sz.x*0.5f, sz.y*0.5f}); enemySpr->setScale({110.f/sz.x, 60.f/sz.y}); }
+}
+enum { SF_CLICK, SF_COIN, SF_POWER, SF_HIT, SF_CRASH, SF_TIER, SF_BOLT, SF_BOOST, SF_NEAR, SF_GUN, SF_MISSILE, SF_NOVA, SF_BGM, SF_COUNT };
+struct Sfx { sf::SoundBuffer buf; std::optional<sf::Sound> snd; }; Sfx* sfx = nullptr;
+void makeSfx(int id, float f0, float f1, float dur, float noise, float vol) {
+    const unsigned R = 44100; std::size_t n = (std::size_t)(dur * R); std::vector<std::int16_t> s(n); float ph = 0;
+    for (std::size_t i = 0; i < n; i++) { float t = (float)i / n; ph += 6.2832f * (f0 + (f1 - f0) * t) / R; s[i] = (std::int16_t)((std::sin(ph) * (1 - noise) + rnd(-1, 1) * noise) * (1 - t) * std::min(1.f, t * 40) * vol * 30000); }
+    if (sfx[id].buf.loadFromSamples(s.data(), s.size(), 1, R, {sf::SoundChannel::Mono})) { sfx[id].snd.emplace(sfx[id].buf); sfx[id].snd->setVolume(80); }
+}
+void makeAllSfx() {
+    makeSfx(SF_CLICK,700,500,0.06f,0,0.5f); makeSfx(SF_COIN,1100,1900,0.13f,0,0.5f); makeSfx(SF_POWER,400,1300,0.35f,0,0.55f); makeSfx(SF_HIT,220,60,0.30f,0.5f,0.8f);
+    makeSfx(SF_CRASH,160,30,0.90f,0.85f,1.f); makeSfx(SF_TIER,500,1000,0.45f,0,0.55f); makeSfx(SF_BOLT,300,50,0.40f,0.9f,0.9f); makeSfx(SF_BOOST,250,900,0.30f,0.6f,0.5f);
+    makeSfx(SF_NEAR,900,1200,0.10f,0,0.4f); makeSfx(SF_GUN,850,280,0.06f,0.35f,0.35f); makeSfx(SF_MISSILE,320,950,0.24f,0.65f,0.55f); makeSfx(SF_NOVA,90,1500,0.85f,0.35f,0.9f);
+    const unsigned R = 44100, N = R * 4; std::vector<std::int16_t> s(N); const float nt[8] = {110,110,130.8f,146.8f,164.8f,146.8f,130.8f,98}; float p1 = 0, p2 = 0;
+    for (unsigned i = 0; i < N; i++) { int st = (i / (R / 4)) % 8; float env = 1.f - 0.7f * (i % (R / 4)) / (R / 4); p1 += 6.2832f * nt[st] / R; p2 += 6.2832f * (nt[st] * 2) / R; s[i] = (std::int16_t)((std::sin(p1) * 0.6f + std::sin(p2) * 0.4f) * env * 5500); }
+    if (sfx[SF_BGM].buf.loadFromSamples(s.data(), s.size(), 1, R, {sf::SoundChannel::Mono})) { sfx[SF_BGM].snd.emplace(sfx[SF_BGM].buf); sfx[SF_BGM].snd->setLooping(true); sfx[SF_BGM].snd->setVolume(38); }
+}
+void playSfx(int id) { if (!muted && sfx && sfx[id].snd) sfx[id].snd->play(); }
+struct Skin { const char* name; sf::Color body, accent, glass, wing; int price; };
+const int NSK = 5, NMIS = 8;
+const Skin SKINS[6] = {{"CLASSIC",{235,235,245},{200,40,40},{90,160,215},{175,185,205},0}, {"SUNSET",{255,225,190},{235,110,30},{255,240,160},{225,160,110},30}, {"STEALTH",{70,75,90},{40,200,220},{30,50,70},{50,55,70},60}, {"GOLD",{245,205,70},{150,100,10},{255,250,210},{200,160,50},100}, {"NEON",{30,30,45},{255,60,200},{80,255,160},{60,60,90},150}, {"CO-PILOT",{200,240,220},{30,150,90},{250,250,150},{120,190,150},0}};
+enum { S_COINS, S_TOWERS, S_LEVEL, S_NEAR, S_POWER, S_BOSS, S_KILLS, S_NOVA, NSTAT };
+int runStat[NSTAT], topScores[5] = {0,0,0,0,0};
+struct Mission { const char* text; int stat, target, reward; };
+const Mission MIS[NMIS] = {{"Collect 15 coins in one run",S_COINS,15,20},{"Pass 12 ground towers in one run",S_TOWERS,12,20},{"Reach TIER 3 (the storm)",S_LEVEL,2,25},{"Make 5 close calls in one run",S_NEAR,5,25},{"Grab 3 power-ups in one run",S_POWER,3,25},{"Defeat the STORM TITAN",S_BOSS,1,50},{"Down 6 enemy planes in one run",S_KILLS,6,30},{"Unleash a NOVA bomb",S_NOVA,1,25}};
+bool missionDone[NMIS], missionNow[NMIS], owned[NSK] = {true,false,false,false,false};
+void saveAll() {
+    std::ofstream f("save.txt"); f << coins << ' ' << skinSel << ' ' << diff << ' ' << numPlayers << '\n';
+    for (int i = 0; i < NSK; i++) f << owned[i] << ' '; f << '\n'; for (int i = 0; i < 5; i++) f << topScores[i] << ' ' << topNames[i] << ' '; f << '\n';
+    for (int i = 0; i < NMIS; i++) f << missionDone[i] << ' '; f << '\n'; for (int i = 0; i < NUP; i++) f << upg[i] << ' '; f << lifetime << ' ' << flights << ' ' << themeSel << '\n';
+}
+void loadAll() {
+    std::ifstream f("save.txt"); if (!f) { std::ifstream old("best.txt"); old >> topScores[0]; best = topScores[0]; return; }
+    std::string line[5]; for (int i = 0; i < 5; i++) std::getline(f, line[i]);
+    std::istringstream s0(line[0]), s1(line[1]), s2(line[2]), s3(line[3]), s4(line[4]);
+    s0 >> coins >> skinSel >> diff >> numPlayers;
+    for (int i = 0; i < NSK; i++) { int v = 0; s1 >> v; owned[i] = (v != 0); }
+    for (int i = 0; i < 5; i++) { s2 >> topScores[i]; if (!(s2 >> topNames[i])) topNames[i] = "ACE"; bool ok = (topNames[i].size() == 3); for (char ch : topNames[i]) if (!std::isalpha((unsigned char)ch)) ok = false; if (!ok) topNames[i] = "ACE"; }
+    for (int i = 0; i < NMIS; i++) { int v = 0; s3 >> v; missionDone[i] = (v != 0); }
+    for (int i = 0; i < NUP; i++) { s4 >> upg[i]; upg[i] = std::clamp(upg[i], 0, UP_MAX); }
+    s4 >> lifetime >> flights >> themeSel; if (lifetime < 0) lifetime = 0; themeSel = std::clamp(themeSel, 0, 5);
+    owned[0] = true; coins = std::max(0, coins); if (skinSel < 0 || skinSel >= NSK || !owned[skinSel]) skinSel = 0; diff = std::clamp(diff, 0, 2); if (numPlayers != 2) numPlayers = 1; best = topScores[0];
+}
+int addHighScore(int s) { int pos = -1; for (int i = 0; i < 5; i++) if (s > topScores[i]) { pos = i; break; } if (pos < 0) return -1; for (int i = 4; i > pos; i--) { topScores[i] = topScores[i - 1]; topNames[i] = topNames[i - 1]; } topScores[pos] = s; topNames[pos] = entryName; best = topScores[0]; return pos; }
+struct Msg { std::string s; float t; sf::Color c; } msg[3];
+void showMsg(int slot, const std::string& s, float t, sf::Color c) { msg[slot] = {s, t, c}; }
+void checkMissions() { runStat[S_LEVEL] = score / 200; for (int i = 0; i < NMIS; i++) if (!missionDone[i] && runStat[MIS[i].stat] >= MIS[i].target) { missionDone[i] = missionNow[i] = true; coins += MIS[i].reward; showMsg(1, std::string("MISSION COMPLETE: ") + MIS[i].text + "  +" + std::to_string(MIS[i].reward), 3.5f, {90,230,120}); playSfx(SF_TIER); } }
+void shopAct() {
+    int i = shopSel;
+    if (shopTab == 1) { if (upg[i] >= UP_MAX) { shopMsg = "Already at max level!"; shopMsgT = 1.8f; playSfx(SF_HIT); } else if (coins >= UP_COST[upg[i]]) { coins -= UP_COST[upg[i]]; upg[i]++; playSfx(SF_POWER); } else { shopMsg = "Need " + std::to_string(UP_COST[upg[i]] - coins) + " more coins."; shopMsgT = 1.8f; playSfx(SF_HIT); } saveAll(); return; }
+    if (owned[i]) { skinSel = i; playSfx(SF_CLICK); } else if (coins >= SKINS[i].price) { coins -= SKINS[i].price; owned[i] = true; skinSel = i; playSfx(SF_POWER); } else { shopMsg = "Need " + std::to_string(SKINS[i].price - coins) + " more coins."; shopMsgT = 1.8f; playSfx(SF_HIT); }
+    saveAll();
+}
+
+
+//REALISTIC GRAPHICS, PARALLAX SKYLINE, INTRO & UI
+
+sf::Transform gXf;
+void box(sf::RenderWindow& w, float x, float y, float wd, float ht, sf::Color c) { sf::RectangleShape r({wd, ht}); r.setPosition({x, y}); r.setFillColor(c); w.draw(r, sf::RenderStates(gXf)); }
+void panel(sf::RenderWindow& w, float x, float y, float wd, float ht, sf::Color bg, sf::Color bd, float th = 2.f) { sf::RectangleShape r({wd, ht}); r.setPosition({x, y}); r.setFillColor(bg); r.setOutlineColor(bd); r.setOutlineThickness(th); w.draw(r, sf::RenderStates(gXf)); }
+void ball(sf::RenderWindow& w, float x, float y, float rad, sf::Color c) { sf::CircleShape s(rad); s.setOrigin({rad, rad}); s.setPosition({x, y}); s.setFillColor(c); w.draw(s, sf::RenderStates(gXf)); }
+void ring(sf::RenderWindow& w, float x, float y, float rad, float th, sf::Color c) { sf::CircleShape s(rad); s.setOrigin({rad, rad}); s.setPosition({x, y}); s.setFillColor(sf::Color::Transparent); s.setOutlineColor(c); s.setOutlineThickness(th); w.draw(s, sf::RenderStates(gXf)); }
+void poly(sf::RenderWindow& w, int n, const float* p, sf::Color c) { sf::ConvexShape s(n); for (int i = 0; i < n; i++) s.setPoint(i, {p[2*i], p[2*i+1]}); s.setFillColor(c); w.draw(s, sf::RenderStates(gXf)); }
+void polyAdd(sf::RenderWindow& w, int n, const float* p, sf::Color c) { sf::ConvexShape s(n); for (int i = 0; i < n; i++) s.setPoint(i, {p[2*i], p[2*i+1]}); s.setFillColor(c); w.draw(s, sf::RenderStates(sf::BlendAdd)); }
+void glow(sf::RenderWindow& w, float x, float y, float rad, sf::Color c) { sf::CircleShape s(rad); s.setOrigin({rad, rad}); s.setPosition({x, y}); s.setFillColor(c); w.draw(s, sf::RenderStates(sf::BlendAdd)); }
+void vignette(sf::RenderWindow& w, std::uint8_t a) { const sf::Color o(4,8,22,a), z(4,8,22,0); const float d=120, W=1000, H=600; sf::Vertex t[4]={{{0,0},o},{{W,0},o},{{0,d},z},{{W,d},z}}, b[4]={{{0,H},o},{{W,H},o},{{0,H-d},z},{{W,H-d},z}}, l[4]={{{0,0},o},{{0,H},o},{{d,0},z},{{d,H},z}}, r[4]={{{W,0},o},{{W,H},o},{{W-d,0},z},{{W-d,H},z}}; w.draw(t,4,sf::PrimitiveType::TriangleStrip); w.draw(b,4,sf::PrimitiveType::TriangleStrip); w.draw(l,4,sf::PrimitiveType::TriangleStrip); w.draw(r,4,sf::PrimitiveType::TriangleStrip); }
+void drawPts(sf::RenderWindow& w, float x, float y, float sc, int n, const float* pts, sf::Color c) { sf::ConvexShape s(n); for (int i = 0; i < n; i++) s.setPoint(i, {x + pts[2*i]*sc, y + pts[2*i+1]*sc}); s.setFillColor(c); w.draw(s, sf::RenderStates(gXf)); }
+void center(sf::RenderWindow& w, sf::Font& f, const std::string& str, int sz, float cx, float cy, sf::Color c) { sf::Text t(f, str, sz); t.setFillColor(c); sf::FloatRect b = t.getLocalBounds(); t.setOrigin({b.position.x + b.size.x/2, b.position.y + b.size.y/2}); t.setPosition({cx, cy}); w.draw(t); }
+void txt(sf::RenderWindow& w, sf::Font& f, const std::string& str, int sz, float x, float y, sf::Color c) { sf::Text t(f, str, sz); t.setFillColor(c); t.setPosition({x, y}); w.draw(t); }
+void label(sf::RenderWindow& w, sf::Font& f, const std::string& str, int sz, float x, float y, sf::Color c) { sf::Text t(f, str, sz); t.setFillColor(c); t.setOutlineColor({10,14,30,220}); t.setOutlineThickness(2); t.setPosition({x, y}); w.draw(t); }
+sf::Color mix(sf::Color a, sf::Color b, float t) { return sf::Color((unsigned char)(a.r+(b.r-a.r)*t), (unsigned char)(a.g+(b.g-a.g)*t), (unsigned char)(a.b+(b.b-a.b)*t)); }
+float fl(float a, float b, float t) { return a + (b - a) * t; }
+void cloud(sf::RenderWindow& w, float x, float y, float s, sf::Color col = {255,255,255}) {
+    std::uint8_t ba = col.a; sf::Color sh = mix(col, {20,28,52}, 0.25f), md = col, hi = mix(col, sf::Color::White, 0.35f); sh.a = ba*0.55f; md.a = ba*0.72f; hi.a = ba*0.85f;
+    box(w, x+4*s, y-16*s, 118*s, 14*s, sh); box(w, x+16*s, y-26*s, 94*s, 16*s, md); box(w, x+28*s, y-35*s, 66*s, 12*s, md); box(w, x+36*s, y-40*s, 44*s, 7*s, hi);
+    ball(w, x+16*s, y-16*s, 12*s, md); ball(w, x+108*s, y-15*s, 11*s, sh); ball(w, x+52*s, y-30*s, 16*s, hi); ball(w, x+78*s, y-26*s, 14*s, md);
+}
+void drawHeroTower(sf::RenderWindow& w, float tx, float topY, float wd, bool spire) {
+    float ht = GROUND_Y - topY;
+    if (spire) { box(w, tx+wd/2-2.5f, topY-58, 5, 58, {115,130,155}); if ((int)(bgTime*2.5f)%2==0) ball(w, tx+wd/2, topY-60, 4, {255,55,55}); }
+    else { box(w, tx+wd/2-2, topY-22, 4, 22, {95,110,135}); if ((int)(bgTime*2.5f+1)%2==0) ball(w, tx+wd/2, topY-24, 3.2f, {255,55,55}); }
+    box(w, tx+10, topY-14, wd-20, 14, {55,68,92}); box(w, tx+10, topY-14, wd-20, 3, {145,185,225}); box(w, tx, topY, wd, ht, {36,48,72}); box(w, tx, topY, 10, ht, {22,30,48}); box(w, tx+wd-4, topY, 4, ht, {135,180,225});
+    float sh[] = {tx+12,topY, tx+52,topY, tx+12,topY+170, tx+12,topY+105}; poly(w, 4, sh, {255,255,255,26});
+    for (int r = 0; 14 + r*30 + 20 < ht; r++) for (int c = 0; c < 4; c++) box(w, tx+14+c*24, topY+14+r*30, 14, 19, ((r+c*2)%3==0) ? sf::Color(255,220,125,220) : sf::Color(85,145,200,190));
+}
+void tower(sf::RenderWindow& w) {
+    float sw1 = 160*std::sin(bgTime*1.1f), sw2 = 160*std::cos(bgTime*0.9f), b1[] = {TOWER_X+45,GROUND_Y,TOWER_X-180+sw1,40,TOWER_X-90+sw1,40}, b2[] = {TOWER_X+210,GROUND_Y,TOWER_X+190+sw2,30,TOWER_X+280+sw2,30};
+    poly(w, 3, b1, {130,215,255,28}); poly(w, 3, b2, {255,225,140,24}); drawHeroTower(w, TOWER_X, 180, 118, true); drawHeroTower(w, TOWER_X+142, 200, 118, false);
+}
+void plane(sf::RenderWindow& w, float x, float y, int skin = 0, float tilt = 0, float flame = 0) {
+    const Skin& s = SKINS[skin]; gXf = sf::Transform(); gXf.rotate(sf::degrees(tilt), {x - 62, y});
+    if (flame > 0) {
+        float f = flame * (0.85f + 0.3f * std::sin(bgTime * 50));
+        float o[]={x-132,y-3,x-132-34*f,y+1,x-132,y+5}, m[]={x-132,y-1.8f,x-132-22*f,y+1,x-132,y+3.8f}, c[]={x-132,y-0.8f,x-132-11*f,y+1,x-132,y+2.8f};
+        poly(w,3,o,{255,110,20,220}); poly(w,3,m,{255,215,70,240}); poly(w,3,c,{180,235,255});
+        if (flame > 1.5f) { ball(w, x-146, y+1, 3.5f, {220,245,255,190}); ball(w, x-158, y+1, 2.5f, {255,220,140,150}); }
+    }
+    if (jetSpr && skin == 0) { jetSpr->setPosition({x - 64, y}); jetSpr->setRotation(sf::degrees(tilt)); w.draw(*jetSpr); gXf = sf::Transform(); return; }
+    sf::Color fw = mix(s.wing, sf::Color::Black, 0.35f), ff = mix(s.accent, sf::Color::Black, 0.35f), bl = mix(s.body, sf::Color::Black, 0.18f), rd = mix(s.body, {35,40,50}, 0.5f);
+    const float p1[]={-108,-7,-128,-39,-116,-39,-92,-7},p2[]={-52,-6,-84,-6,-102,-18,-88,-18},p3[]={-40,7,-74,7,-78,15,-44,15},p4[]={-40,8,-45,8,-47,14,-43,14};
+    const float p5[]={0,2,-16,-3,-34,-7,-96,-8,-118,-5,-128,-3,-128,5,-112,8,-72,9,-38,9,-16,6},p6[]={-16,6,-38,9,-72,9,-112,8,-124,5,-124,3,-20,3},p7[]={0,2,-16,-3,-22,-4,-22,6.5f,-16,6};
+    const float p8[]={-24,-6,-34,-14,-50,-16,-64,-13,-72,-7},p9[]={-26,-6,-35,-13,-49,-15,-62,-12,-68,-7},p10[]={-36,-12,-48,-14,-58,-11.5f,-47,-12.5f};
+    const float p11[]={-24,1,-116,0,-116,3.5f,-24,3.5f},p12[]={-104,-7,-134,-44,-118,-44,-84,-7},p13[]={-134,-44,-118,-44,-121,-38,-131,-38},p14[]={-108,2,-124,2,-138,13,-126,13};
+    const float p15[]={-50,3,-86,3,-108,34,-92,34},p16[]={-50,3,-54,3,-95,34,-92,34},p17[]={-87,33,-81,34.75f,-87,36.5f},p18[]={-126,-3.5f,-134,-2.5f,-134,4.5f,-126,5.5f};
+    drawPts(w,x,y,1,4,p1,ff); drawPts(w,x,y,1,4,p2,fw); drawPts(w,x,y,1,4,p3,bl); drawPts(w,x,y,1,4,p4,{20,22,28});
+    drawPts(w,x,y,1,11,p5,s.body); drawPts(w,x,y,1,7,p6,bl); drawPts(w,x,y,1,5,p7,rd); box(w,x-2,y+1.2f,10,1.5f,{190,195,205}); box(w,x-82,y-2,45,1,{40,45,55,140});
+    drawPts(w,x,y,1,5,p8,{40,45,58}); drawPts(w,x,y,1,5,p9,s.glass); ball(w,x-45,y-9.5f,3.3f,{45,50,62}); box(w,x-44,y-10.8f,3,2,{230,185,50}); drawPts(w,x,y,1,4,p10,{255,255,255,135});
+    drawPts(w,x,y,1,4,p11,s.accent); drawPts(w,x,y,1,4,p12,s.accent); drawPts(w,x,y,1,4,p13,s.body); drawPts(w,x,y,1,4,p14,s.wing);
+    drawPts(w,x,y,1,4,p15,s.wing); drawPts(w,x,y,1,4,p16,mix(s.wing,sf::Color::White,0.35f)); box(w,x-109,y+33,22,3.5f,{235,235,240}); drawPts(w,x,y,1,3,p17,{210,45,45});
+    box(w,x-109,y+31.5f,4,6.5f,{80,85,95}); drawPts(w,x,y,1,4,p18,{60,65,76}); box(w,x-135,y-2,2.5f,6,{22,24,30});
+    ball(w,x-96,y+34,2.2f,{60,255,120}); if ((int)(bgTime*3)%2==0) ball(w,x-126,y-43,2,{255,60,60});
+    gXf = sf::Transform();
+}
+void drawEnemyPlane(sf::RenderWindow& w, float x, float y, int kind, float hpFrac) {
+    float sc = (kind == 1) ? 1.15f : 0.92f;
+    if (enemySpr && kind == 0) { enemySpr->setPosition({x, y}); w.draw(*enemySpr); }
+    else {
+        sf::Color bd=(kind==1)?sf::Color(65,35,85):sf::Color(55,60,72), ac=(kind==1)?sf::Color(255,110,30):sf::Color(215,40,45), gl=(kind==1)?sf::Color(255,200,60):sf::Color(255,70,70);
+        float f=0.8f+0.3f*std::sin(bgTime*45+x), f1[]={52,-3,52+22*f,0,52,3}, f2[]={52,-1.5f,52+12*f,0,52,1.5f}, e1[]={-55,1,-35,-5,45,-7,52,-3,52,4,35,7,-35,6}, e2[]={-55,1,-35,-5,-28,-5,-28,6,-35,6}, e3[]={-28,-5,-18,-13,-4,-14,10,-7}, e4[]={30,-6,52,-34,42,-34,18,-6}, e5[]={-5,2,20,2,34,24,18,24};
+        drawPts(w,x,y,sc,3,f1,{255,90,20,220}); drawPts(w,x,y,sc,3,f2,{255,220,100}); drawPts(w,x,y,sc,7,e1,bd); drawPts(w,x,y,sc,5,e2,ac); drawPts(w,x,y,sc,4,e3,gl); drawPts(w,x,y,sc,4,e4,ac); drawPts(w,x,y,sc,4,e5,mix(bd,sf::Color::Black,0.25f));
+    }
+    box(w, x-24, y-34*sc, 48, 5, {0,0,0,180}); box(w, x-23, y-33*sc, 46*hpFrac, 3, {255,65,65});
+}
+void title(sf::RenderWindow& w, sf::Font& f, float t0) {
+    const char* words[4] = {"ESCAPE","THE","TWIN","TOWERS"}; float width[4], total = 60;
+    for (int i = 0; i < 4; i++) { sf::Text s(f, words[i], 44); width[i] = s.getLocalBounds().size.x; total += width[i]; }
+    float x = (1000 - total) / 2;
+    for (int i = 0; i < 4; i++) { float t = t0 - i*0.25f, dy = (t>0 && t<0.8f) ? 25*std::sin(6.2832f*t/0.8f) : 0; sf::Text s(f, words[i], 44); s.setFillColor({255,235,150}); s.setOutlineColor({15,22,55}); s.setOutlineThickness(4); s.setPosition({x, 95 - dy}); w.draw(s); x += width[i] + 20; }
+}
+struct Look { sf::Color top, bottom, mtn, farC, nearC, cloud, ground, body; float bodyY, bodyA, night, rain, stars; };
+const Look PAL[5] = {
+    {{28,125,220},{150,228,255},{115,180,222},{86,142,190},{58,108,156},{255,255,255},{52,64,78},{255,245,175},90,255,0,0,0},
+    {{58,28,108},{255,122,78},{145,62,125},{102,44,102},{68,28,78},{255,185,155},{48,40,62},{255,155,60},335,255,0.45f,0,0.15f},
+    {{24,34,58},{76,118,136},{48,72,92},{38,56,74},{28,42,58},{92,108,128},{32,42,52},{160,185,205},200,0,0.6f,1,0},
+    {{6,10,34},{46,32,96},{26,24,68},{18,18,52},{12,14,38},{68,78,125},{20,24,38},{235,242,255},90,255,1,0,1},
+    {{68,92,195},{255,186,148},{152,135,188},{118,104,158},{86,76,128},{255,222,208},{54,68,74},{255,210,135},340,255,0.3f,0,0}
+};
+Look look = PAL[0];
+float phaseF = 0, phaseTarget = 0, mtnH[20], mtnOff = 0, cloudX[10], cloudY[10], cloudS[10], cloudV[10], stX[16], stY[16], stL[16], rainX[75], rainY[75], starX[60], starY[60], groundOff = 0, fgOff = 0;
+struct Skyline { float x[30], w[30], h[30], total, offset, speed; sf::Color col; } farCity, nearCity;
+void buildSkyline(Skyline& s, float minH, float maxH, float sp, sf::Color col) { s.total = 0; s.offset = 0; s.speed = sp; s.col = col; for (int i = 0; i < 30; i++) { s.w[i] = rnd(44, 96); s.h[i] = rnd(minH, maxH); s.x[i] = s.total; s.total += s.w[i]; } }
+void initBackground() {
+    buildSkyline(farCity,110,235,18,PAL[0].farC); buildSkyline(nearCity,60,165,38,PAL[0].nearC);
+    for (int i=0;i<20;i++) mtnH[i]=rnd(145,285);
+    for (int i=0;i<10;i++) { bool f=i<5; cloudX[i]=rnd(0,1000); cloudY[i]=f?rnd(40,290):rnd(60,460); cloudS[i]=f?rnd(0.5f,0.8f):rnd(0.9f,1.4f); cloudV[i]=f?rnd(6,12):rnd(16,28); }
+    for (int i=0;i<16;i++) { stX[i]=rnd(0,1000); stY[i]=rnd(30,520); stL[i]=rnd(35,95); }
+    for (int i=0;i<75;i++) { rainX[i]=rnd(0,1100); rainY[i]=rnd(0,600); } for (int i=0;i<60;i++) { starX[i]=rnd(0,1000); starY[i]=rnd(10,340); } look = PAL[0];
+}
+void updateBackground(float dt, float mult) {
+    bgTime += dt; phaseF += (phaseTarget - phaseF) * std::min(1.f, dt * 1.2f);
+    int i = (int)phaseF % 5, j = (i + 1) % 5; float t = phaseF - (int)phaseF;
+    look.top=mix(PAL[i].top,PAL[j].top,t); look.bottom=mix(PAL[i].bottom,PAL[j].bottom,t); look.mtn=mix(PAL[i].mtn,PAL[j].mtn,t); look.farC=mix(PAL[i].farC,PAL[j].farC,t);
+    look.nearC=mix(PAL[i].nearC,PAL[j].nearC,t); look.cloud=mix(PAL[i].cloud,PAL[j].cloud,t); look.ground=mix(PAL[i].ground,PAL[j].ground,t); look.body=mix(PAL[i].body,PAL[j].body,t);
+    look.bodyY=fl(PAL[i].bodyY,PAL[j].bodyY,t); look.bodyA=fl(PAL[i].bodyA,PAL[j].bodyA,t); look.night=fl(PAL[i].night,PAL[j].night,t); look.rain=fl(PAL[i].rain,PAL[j].rain,t); look.stars=fl(PAL[i].stars,PAL[j].stars,t);
+    mtnOff = std::fmod(mtnOff + 8.f*mult*dt, 2400.f); farCity.offset = std::fmod(farCity.offset + farCity.speed*mult*dt, farCity.total);
+    nearCity.offset = std::fmod(nearCity.offset + nearCity.speed*mult*dt, nearCity.total); groundOff = std::fmod(groundOff + 250*mult*dt, 1400.f); fgOff = std::fmod(fgOff + 360*mult*dt, 1600.f);
+    for (int k=0;k<10;k++) { cloudX[k]-=cloudV[k]*mult*dt; if (cloudX[k]<-150*cloudS[k]) { cloudX[k]=1050+rnd(0,200); cloudY[k]=k<5?rnd(40,290):rnd(60,460); } }
+    for (int k=0;k<16;k++) { stX[k]-=520*mult*dt; if (stX[k]+stL[k]<0) { stX[k]=1000+rnd(0,300); stY[k]=rnd(30,520); } }
+    for (int k=0;k<75;k++) { rainY[k]+=650*mult*dt; rainX[k]-=100*mult*dt; if (rainY[k]>600) { rainY[k]=-20; rainX[k]=rnd(0,1100); } }
+}
+void drawBackground(sf::RenderWindow& w, bool streaksOn) {
+    for (int i = 0; i < 24; i++) box(w, -30, i*25.f-(i==0?30:0), 1060, 26+(i==0?30:0), mix(look.top, look.bottom, i/23.f));
+    if (look.rain > 0.4f && (int)(bgTime * 7) % 19 == 0) box(w, -30, -30, 1060, 660, {180,220,255,38});
+    if (look.stars > 0.02f) for (int i=0;i<60;i++) box(w, starX[i], starY[i], 2+(i%3==0?1:0), 2, {255,255,255,(std::uint8_t)(look.stars*(150+100*std::sin(bgTime*3+i)))});
+    if (look.bodyA > 1) {
+        sf::Color gl=look.body, cr=mix(look.body,sf::Color::White,0.55f), md=look.body; float sy=look.bodyY-camY*0.2f; gl.a=55*look.bodyA/255; md.a=look.bodyA; cr.a=look.bodyA;
+        ball(w,880,sy,98,gl); ball(w,880,sy,56,md); ball(w,880,sy,38,cr);
+        for (int k=0;k<7;k++) { float a=bgTime*0.05f+k*0.9f, r=1500; sf::Color rc=look.body; rc.a=18*look.bodyA/255*(1-0.6f*look.night); float ray[]={880,sy,880+r*std::cos(a-0.035f),sy+r*std::sin(a-0.035f),880+r*std::cos(a+0.035f),sy+r*std::sin(a+0.035f)}; polyAdd(w,3,ray,rc); }
+    }
+    sf::Color fc(look.cloud.r, look.cloud.g, look.cloud.b, 175); for (int i=0;i<5;i++) cloud(w, cloudX[i], cloudY[i]-camY*0.3f, cloudS[i], fc);
+    for (int pass=0;pass<2;pass++) for (int i=0;i<20;i++) {
+        float x0=i*120.f+pass*2400.f-mtnOff; if (x0>1060 || x0+192<-40) continue;
+        float pk=x0+84.f, py=GROUND_Y-mtnH[i]-camY*0.45f, gy=GROUND_Y+20, t1[]={x0-25,gy,pk,py,x0+174,gy}, t2[]={pk,py,x0+174,gy,pk+21.6f,gy};
+        poly(w,3,t1,look.mtn); poly(w,3,t2,mix(look.mtn,look.body,0.22f));
+    }
+    farCity.col = look.farC; nearCity.col = look.nearC;
+    for (int layer=0;layer<2;layer++) {
+        Skyline& s = (layer==0)?farCity:nearCity; float py = camY*(layer==0?0.6f:0.85f);
+        for (int pass=0;pass<2;pass++) for (int i=0;i<30;i++) {
+            float bx=s.x[i]+pass*s.total-s.offset; if (bx>1000||bx+s.w[i]<0) continue; float by=GROUND_Y-s.h[i]-py;
+            box(w,bx,by,s.w[i]+1,s.h[i]+30,s.col); box(w,bx+s.w[i]-3,by,3,s.h[i]+30,mix(s.col,look.bottom,0.25f));
+            if (i%3==0) { box(w,bx+8,by-10,s.w[i]-16,10,mix(s.col,sf::Color::Black,0.15f)); if (layer==1) { box(w,bx+s.w[i]*0.5f-1,by-24,2,14,s.col); if ((int)(bgTime*2.5f+i)%2==0) ball(w,bx+s.w[i]*0.5f,by-25,2.2f,{255,50,50}); if (look.night>0.3f) box(w,bx+10,by-10,s.w[i]-20,2,(i%2==0)?sf::Color(80,230,255,200):sf::Color(255,90,190,200)); } }
+            else if (layer==1&&i%4==1) box(w,bx+12,by-6,16,6,mix(s.col,sf::Color::Black,0.25f));
+            if (layer==1&&look.night>0.25f) { std::uint8_t wa=std::min(1.f,look.night*1.2f)*200; sf::Color wc=(i%3==0)?sf::Color(110,225,255,wa):sf::Color(255,220,120,wa); for (int r=0;r<std::max(1,(int)(s.h[i]/22));r++) for (int c=0;c<std::max(1,(int)(s.w[i]/16));c++) if (((i*7+r*3+c*5)%4)==0) box(w,bx+6+c*14,by+10+r*20,7,10,wc); }
+        }
+    }
+    box(w,-30,GROUND_Y-45,1060,45,{look.bottom.r,look.bottom.g,look.bottom.b,55});
+    for (int i=5;i<10;i++) cloud(w, cloudX[i], cloudY[i]-camY*0.8f, cloudS[i], look.cloud);
+    box(w,-30,GROUND_Y,1060,80,look.ground); box(w,-30,GROUND_Y,1060,5,mix(look.ground,look.bottom,0.35f));
+    for (int i=0;i<20;i++) { float x=std::fmod(i*70.f-groundOff,1400.f); if(x<0)x+=1400; x-=70; box(w,x,GROUND_Y+24,38,4,{235,210,95,175}); if(i%3==0){box(w,x+16,GROUND_Y-22,3,22,{70,78,92});glow(w,x+17,GROUND_Y-22,14,{255,215,120,(std::uint8_t)(40+110*look.night)});} }
+    if (look.rain>0.05f) for (int i=0;i<75;i++) box(w,rainX[i],rainY[i],2,18,{210,235,255,(std::uint8_t)(look.rain*135)});
+    if (streaksOn) for (int i=0;i<16;i++) box(w,stX[i],stY[i],stL[i]*(1+2*boostFx),2,{255,255,255,(std::uint8_t)(90+90*boostFx)});
+}
+void drawForegroundSilhouettes(sf::RenderWindow& w) { for (int i=0;i<8;i++) { float x=std::fmod(i*200.f-fgOff,1600.f); if(x<0)x+=1600; x-=120; box(w,x,558,70,42,{10,14,24,175}); box(w,x+32,538,4,20,{10,14,24,175}); } }
+
+
+// GAMEPLAY, WINGMAN, BARREL ROLL, RADAR, BOSS, NOVA & COMBAT
+
+struct Particle { float x, y, vx, vy, life, maxLife, r, grav; sf::Color c; } ptc[400];
+void addPart(float x, float y, float vx, float vy, float life, float r, sf::Color c, float grav = 0) { for (int i=0;i<400;i++) if (ptc[i].life<=0) { ptc[i]={x,y,vx,vy,life,life,r,grav,c}; return; } }
+void burst(float x, float y, int n, float sp) { for (int i=0;i<n;i++) { float a=rnd(0,6.2832f), s=rnd(40,sp); bool sm=(i%3==2); addPart(x,y,std::cos(a)*s,std::sin(a)*s,sm?rnd(0.9f,1.6f):rnd(0.5f,1.3f),sm?rnd(7,13):rnd(4,10),sm?sf::Color(70,70,76,200):(i%3==0)?sf::Color(255,100,0):sf::Color(255,210,0),sm?-25:300); } }
+struct Debris { float x, y, vx, vy, ang, spin, sz, life; sf::Color c; }; std::vector<Debris> debris;
+void addDebris(float x, float y, int n) { for (int i=0;i<n;i++) { float a=rnd(0,6.2832f), sp=rnd(90,320); debris.push_back({x,y,std::cos(a)*sp,std::sin(a)*sp-60,rnd(0,6.28f),rnd(-12,12),rnd(6,12),rnd(0.6f,1.2f),(i%2==0)?sf::Color(70,78,95):sf::Color(180,75,45)}); } }
+struct Shock { float x, y, r, maxR, life; sf::Color c; bool fill; }; std::vector<Shock> shocks;
+void addShock(float x, float y, float maxR, sf::Color c) { shocks.push_back({x, y, 8, maxR, 0.4f, c, false}); }
+void addFlash(float x, float y, float maxR, sf::Color c) { shocks.push_back({x, y, maxR*0.3f, maxR, 0.3f, c, true}); }
+struct FText { std::string s; float x, y, life; sf::Color c; } ft[20];
+void addText(float x, float y, const std::string& s, sf::Color c) { for (int i=0;i<20;i++) if (ft[i].life<=0) { ft[i]={s,x,y,1,c}; return; } }
+void updateEffects(float dt) {
+    for (int i=0;i<400;i++) if (ptc[i].life>0) { ptc[i].vy+=ptc[i].grav*dt; ptc[i].x+=ptc[i].vx*dt; ptc[i].y+=ptc[i].vy*dt; ptc[i].life-=dt; }
+    for (std::size_t i=0;i<debris.size();) { Debris& d=debris[i]; d.vy+=420*dt; d.x+=d.vx*dt; d.y+=d.vy*dt; d.ang+=d.spin*dt; d.life-=dt; if (d.life<=0||d.y>GROUND_Y) debris.erase(debris.begin()+i); else i++; }
+    for (std::size_t i=0;i<shocks.size();) { shocks[i].life-=dt; shocks[i].r+=(shocks[i].maxR-shocks[i].r)*std::min(1.f,9*dt); if (shocks[i].life<=0) shocks.erase(shocks.begin()+i); else i++; }
+}
+void drawEffects(sf::RenderWindow& w, sf::Font& f) {
+    for (int i=0;i<400;i++) if (ptc[i].life>0) { float a=ptc[i].life/ptc[i].maxLife; sf::Color c=ptc[i].c; c.a=a*c.a; if (c.r+c.g+c.b>330) { float rr=ptc[i].r*(0.4f+0.6f*a); glow(w,ptc[i].x,ptc[i].y,rr,c); if(rr>4)glow(w,ptc[i].x,ptc[i].y,rr*2.4f,{c.r,c.g,c.b,(std::uint8_t)(c.a*0.22f)}); } else { c.a*=0.7f; ball(w,ptc[i].x,ptc[i].y,ptc[i].r*(1.5f-0.7f*a),c); } }
+    for (const Debris& d:debris) { sf::ConvexShape s(3); s.setPoint(0,{0,-d.sz}); s.setPoint(1,{d.sz*0.8f,d.sz*0.6f}); s.setPoint(2,{-d.sz*0.7f,d.sz*0.4f}); s.setPosition({d.x,d.y}); s.setRotation(sf::radians(d.ang)); sf::Color c=d.c; c.a=std::min(1.f,d.life*2)*255; s.setFillColor(c); w.draw(s); }
+    for (const Shock& s:shocks) { sf::Color c=s.c; c.a=std::min(1.f,s.life/0.4f)*210; if (s.fill) glow(w,s.x,s.y,s.r,{c.r,c.g,c.b,(std::uint8_t)(c.a*0.75f)}); else ring(w,s.x,s.y,s.r,3,c); }
+    for (int i=0;i<20;i++) if (ft[i].life>0) { sf::Text t(f,ft[i].s,22); sf::Color c=ft[i].c; c.a=255*std::min(1.f,ft[i].life*1.5f); t.setFillColor(c); t.setOutlineColor({0,0,0,c.a}); t.setOutlineThickness(2); sf::FloatRect b=t.getLocalBounds(); t.setOrigin({b.position.x+b.size.x/2,b.position.y+b.size.y/2}); t.setPosition({ft[i].x,ft[i].y}); w.draw(t); }
+}
+bool touches(const sf::FloatRect& a, const sf::FloatRect& b) { return a.findIntersection(b).has_value(); }
+sf::FloatRect grow(const sf::FloatRect& r, float m) { return {{r.position.x-m, r.position.y-m}, {r.size.x+2*m, r.size.y+2*m}}; }
+void bumpCombo() { combo = std::min(5, combo + 1); comboT = 3.5f; if (combo == 5 && overdriveT <= 0) { overdriveT = 6; showMsg(0, "OVERDRIVE!  TWIN CANNONS ACTIVE!", 2.5f, {255,215,60}); playSfx(SF_TIER); } }
+void addNova(float v) { if (nova >= 1.f) return; nova += v * (1.f + 0.25f * upg[3]); if (nova >= 1.f) { nova = 1.f; showMsg(2, "NOVA READY!   PRESS V   (P2: ENTER)", 2.5f, {120,235,255}); playSfx(SF_TIER); } }
+struct Player { float x=300,y=280,vx=0,vy=0,inv=0,shield=0,magnet=0,wingman=0,wingFire=0,boostT=0,boostCd=0,rollT=0,rollCd=0,gunCd=0,misCd=0,flareCd=0,tilt=0,trail=0; int lives=3,skin=0; bool alive=false; } pl[2];
+float refX = 300, slowT = 0, doubleT = 0, overT = 0, reviveT = 0;
+const float BOOST_TIME = 0.4f, BOOST_CD = 3.0f, ROLL_TIME = 0.35f, ROLL_CD = 3.0f, GUN_CD = 0.11f, MISSILE_CD = 1.4f, FLARE_CD = 3.0f;
+float boostCdTime() { return BOOST_CD - 0.5f * upg[1]; }
+float missileCdTime() { return MISSILE_CD - 0.25f * upg[2]; }
+sf::FloatRect bodyBox(const Player& p) { return {{p.x-125, p.y-12}, {120, 24}}; }
+sf::FloatRect wingBox(const Player& p) { return {{p.x-100, p.y+10}, {40, 32}}; }
+bool anyAlive() { return pl[0].alive || pl[1].alive; }
+struct Bullet { float x, y, vx, vy; int owner; bool missile; float life; }; std::vector<Bullet> bullets;
+struct Flare { float x, y, vx, vy, life; }; std::vector<Flare> flares;
+struct EnemyPlane { float x, y, vx, vy, hp, maxHp, shotCd; int kind; }; std::vector<EnemyPlane> enemies;
+struct Crate { float x, y, vy; bool alive, rescue; } crate = {0,0,0,false,false};
+float tEnemy = 4, tCrate = 22, tSam = 12, tCoin = 2, tPower = 9;
+struct Coin { float x, y, t; bool alive; } cn[80];
+enum { P_SHIELD, P_SLOW, P_MAGNET, P_DOUBLE, P_WINGMAN, NPW };
+struct Power { float x, y, t; int kind; bool alive; } pw[4];
+void spawnCoinLine(float x, float y, int n, bool wave);
+enum ObType { O_TOWER, O_CLOUD, O_BIRD, O_BOLT, O_WIND, O_GATE, O_CRANE, O_DRONE };
+struct Obstacle { ObType type; float x, y, w, h, vx, vy, timer, dir, a; bool scrolls, passed; int zone; }; std::vector<Obstacle> obs;
+float tTower, tCloud, tBird, tWind, tBolt, tGate, tCrane, tDrone, quietTime, sinceTower, bossT = 0, tBoss = 45, bossShot = 0, bossHp = 20, bossMaxHp = 20;
+const float BOSS_LEN = 18;
+void addObstacle(ObType t, float x, float y, float w, float h, float vx, float vy, bool sc, float dir = 0, float a = 0) { obs.push_back({t,x,y,w,h,vx,vy,0,dir,a,sc,false,0}); }
+void resetObstacles() { obs.clear(); bullets.clear(); enemies.clear(); flares.clear(); shocks.clear(); debris.clear(); crate.alive=false; tTower=0.8f; tCloud=3; tBird=6; tWind=5; tBolt=8; tGate=5; tCrane=9; tDrone=7; tEnemy=4; tCrate=22; tSam=12; reviveT=0; quietTime=0; sinceTower=5; bossT=0; tBoss=45; bossShot=0; bossHp=bossMaxHp; }
+void calmTowers(float t) { if (tTower < t) tTower = t; }
+float cranePos(const Obstacle& o, float& cx, float& cy) { float ang = 0.8f*std::sin(o.timer*1.8f+o.a); cx = o.x+o.w/2+o.h*std::sin(ang); cy = o.h*std::cos(ang); return ang; }
+sf::FloatRect obstacleBox(const Obstacle& o) { float cx=0, cy=0; if (o.type==O_CLOUD) return {{o.x+14,o.y+18},{o.w-28,o.h-28}}; if (o.type==O_BIRD||o.type==O_DRONE) return {{o.x+4,o.y+3},{o.w-8,o.h-6}}; if (o.type==O_BOLT) return {{o.x,o.y},{o.w,o.h}}; if (o.type==O_CRANE) { cranePos(o,cx,cy); return {{cx-22,cy-22},{44,44}}; } return {{o.x+3,o.y},{o.w-6,o.h}}; }
+bool obstacleTouches(const Obstacle& o, const sf::FloatRect& r) { if (o.type==O_WIND||(o.type==O_BOLT&&!(o.timer>1.2f&&o.timer<1.5f))) return false; if (o.type==O_GATE) return touches(r,{{o.x+3,0},{o.w-6,o.y}})||touches(r,{{o.x+3,o.y+o.h},{o.w-6,GROUND_Y-o.y-o.h}}); return touches(r, obstacleBox(o)); }
+bool obstaclesHit(const sf::FloatRect& r) { for (const Obstacle& o : obs) if (obstacleTouches(o, r)) return true; return false; }
+float windAt(const sf::FloatRect& r) { float p = 0; for (const Obstacle& o : obs) if (o.type == O_WIND && touches(r, {{o.x,o.y},{o.w,o.h}})) p += o.dir * 230; return p; }
+void defeatBoss() { bossT=0; tBoss=70; runStat[S_BOSS]=1; score+=100*combo; hitStop=std::max(hitStop,0.3f); addNova(0.5f); showMsg(0,"STORM TITAN DEFEATED!  +"+std::to_string(100*combo),3.5f,{255,210,50}); burst(400,80,55,380); addShock(400,80,180,{255,210,60}); addFlash(400,80,280,{255,230,150}); playSfx(SF_TIER); spawnCoinLine(1050,rnd(200,400),8,true); }
+void updateObstacles(float dt, float scroll, int level) {
+    float k = std::max(0.5f, 1.f - 0.07f * level) * DIFF_WAIT[diff];
+    tTower-=dt; tCloud-=dt; tBird-=dt; tWind-=dt; tBolt-=dt; tGate-=dt; tCrane-=dt; tDrone-=dt; quietTime-=dt; sinceTower+=dt; tBoss-=dt;
+    if (bossT<=0 && level>=3 && tBoss<=0 && quietTime<=0 && anyAlive()) { bossT=BOSS_LEN; bossHp=bossMaxHp; bossShot=1.8f; quietTime=1.5f; showMsg(0,"WARNING!  SHOOT THE STORM TITAN!",3.5f,{255,70,70}); playSfx(SF_BOLT); }
+    if (bossT > 0) { bossT-=dt; bossShot-=dt; if (bossShot<=0) { int who=(numPlayers==2&&pl[1].alive&&(!pl[0].alive||rand()%2==0))?1:0; addObstacle(O_BOLT,std::clamp(pl[who].x-60+rnd(-50,50),120.f,930.f)-30,80,60,GROUND_Y-80,0,0,false,1); if (bossHp<bossMaxHp*0.5f) addObstacle(O_BOLT,rnd(150,900),80,60,GROUND_Y-80,0,0,false,1); bossShot=(bossHp<bossMaxHp*0.5f?0.65f:0.9f)+0.9f*bossT/BOSS_LEN; } if (bossT<=0) defeatBoss(); }
+    if (tTower<=0) { float h=rnd(130,330); addObstacle(O_TOWER,1050,GROUND_Y-h,TOWER_W,h,0,0,true); tTower=rnd(1.3f,2.3f)*k; sinceTower=0; }
+    if (tWind<=0) { addObstacle(O_WIND,1050,rnd(60,330),260,170,0,0,true,rnd(0,1)<0.5f?-1:1); tWind=rnd(7,11); }
+    if (quietTime<=0 && bossT<=0) {
+        if (level>=3&&tCrane<=0&&sinceTower>1.4f) { float len=rnd(180,330); addObstacle(O_CRANE,1050-len,0,2*len+70,len,0,0,true,0,rnd(0,6.28f)); tCrane=rnd(9,14)*k; quietTime=1.2f; calmTowers(2.5f); }
+        else if (level>=1&&tGate<=0&&sinceTower>1.4f) { addObstacle(O_GATE,1050,0,TOWER_W,std::max(150.f,205.f-level*6),0,0,true,0,rnd(210,340)); tGate=rnd(7,11)*k; quietTime=1; calmTowers(2); }
+        else if (level>=2&&tBolt<=0) { addObstacle(O_BOLT,rnd(380,900),80,60,GROUND_Y-80,0,0,false); tBolt=rnd(5,8)*k; quietTime=1.2f; }
+        else if (level>=3&&tDrone<=0) { addObstacle(O_DRONE,1050,0,46,22,-150,0,true,0,rnd(150,420)); tDrone=rnd(5,8)*k; quietTime=1; calmTowers(1.2f); }
+        else if (level>=1&&tBird<=0) { float y0=rnd(150,420); if (level>=2&&rnd(0,1)<0.5f) { int n=3+rand()%3; for(int i=0;i<n;i++){addObstacle(O_BIRD,1050+i*50,y0+((i+1)/2)*30.f*(i%2?1:-1),40,20,-180,0,true); if(i>0)obs.back().passed=true;} calmTowers(1.8f); } else addObstacle(O_BIRD,1050,rnd(80,480),40,20,-180,0,true); tBird=rnd(4,7)*k; quietTime=0.9f; }
+        else if (tCloud<=0) { float s=rnd(1,1.5f); addObstacle(O_CLOUD,rnd(1050,1250),-90*s,120*s,70*s,0,rnd(110,190)+level*10,true); tCloud=rnd(2.2f,3.6f)*k; quietTime=0.9f; }
+    }
+    for (std::size_t i=0;i<obs.size();) {
+        Obstacle& o=obs[i]; o.timer+=dt; o.x+=((o.scrolls?-scroll:0)+o.vx)*dt; o.y+=o.vy*dt;
+        if (o.type==O_DRONE) o.y=o.a+80*std::sin(o.timer*2.6f); if (o.type==O_GATE) o.y=o.a+70*std::sin(o.timer*1.7f)-o.h/2;
+        bool gone=o.x+o.w<-20||o.y>GROUND_Y||(o.type==O_BOLT&&o.timer>1.5f), behind=o.type!=O_BOLT&&o.x+o.w<refX-125;
+        if ((behind||gone)&&!o.passed&&o.type!=O_WIND) { o.passed=true; int pts=(doubleT>0)?20:10; score+=pts; if(o.type==O_TOWER)runStat[S_TOWERS]++; addText(std::max(60.f,o.x+o.w),std::clamp(o.y,80.f,480.f),"+"+std::to_string(pts),sf::Color::White); }
+        if (gone) obs.erase(obs.begin()+i); else i++;
+    }
+}
+sf::Color windowColor(int r, int c) { bool lit=(r+c)%3==0||(look.night>0.45f&&(r*2+c)%2==0); return lit?mix({115,200,245},{255,225,130},std::min(1.f,look.night+0.35f)):mix({95,165,215},{24,34,62},look.night); }
+void drawBlock(sf::RenderWindow& w, float x, float y, float h) {
+    sf::Color bd=mix({46,60,86},{22,28,48},look.night); box(w,x,y,TOWER_W,h,bd); box(w,x,y,8,h,mix(bd,sf::Color::Black,0.35f)); box(w,x+TOWER_W-4,y,4,h,mix(bd,look.bottom,0.35f));
+    if (h>40) { float sh=std::min(h-10,110.f), s[]={x+12,y,x+46,y,x+12,y+sh,x+12,y+sh*0.5f}; poly(w,4,s,{255,255,255,24}); }
+    for (int r=0;14+r*36+22<h;r++) { box(w,x+8,y+8+r*36,TOWER_W-12,2,mix(bd,sf::Color::Black,0.25f)); for (int c=0;c<3;c++) box(w,x+14+c*26,y+14+r*36,16,22,windowColor(r,c)); }
+}
+void drawGroundTower(sf::RenderWindow& w, float x, float y, float h) {
+    drawBlock(w,x,y,h); box(w,x+12,y-16,TOWER_W-24,8,{50,62,84}); box(w,x-4,y-8,TOWER_W+8,10,{62,74,98}); box(w,x-4,y-8,TOWER_W+8,2,{150,185,220});
+    box(w,x+TOWER_W/2-2,y-40,4,24,{85,95,115}); if ((int)(bgTime*3+x*0.05f)%2==0) ball(w,x+TOWER_W/2,y-41,3.2f,{255,55,55});
+}
+void drawStormCloud(sf::RenderWindow& w, const Obstacle& o) {
+    float s=o.w/120; cloud(w,o.x-3,o.y+o.h+3,s*1.05f,mix({85,95,125},{155,175,220},look.night)); cloud(w,o.x,o.y+o.h,s,mix({32,36,52},{70,80,118},look.night)); cloud(w,o.x+0.12f*o.w,o.y+o.h-4,s*0.75f,mix({52,58,78},{95,108,150},look.night));
+    if (((int)(o.timer*9)%5)==0) { float lx=o.x+o.w*0.45f,ly=o.y+o.h*0.45f,b[]={lx-18,ly-4,lx,ly+3,lx+16,ly-6,lx+2,ly+8}; poly(w,4,b,{170,235,255,210}); }
+}
+void drawBird(sf::RenderWindow& w, const Obstacle& o) { float cx=o.x+o.w/2,cy=o.y+o.h/2,flp=std::sin(o.timer*16)*14,wg[]={cx-8,cy,cx+8,cy,cx+2,cy-flp},tl[]={cx+6,cy-2,cx+20,cy+2,cx+6,cy+4},bk[]={cx-14,cy-5,cx-22,cy-2,cx-14,cy}; sf::Color dk=mix({25,25,30},{215,220,235},look.night); poly(w,3,wg,dk); poly(w,3,tl,dk); ball(w,cx,cy,8,dk); ball(w,cx-10,cy-3,5,dk); poly(w,3,bk,{240,160,30}); }
+void drawBolt(sf::RenderWindow& w, const Obstacle& o) { float cx=o.x+o.w/2; if (o.dir==0) cloud(w,cx-90,100,1.5f,mix({35,40,56},{85,95,138},look.night)); if (o.timer<1.2f) { int a=90+120*(0.5f+0.5f*std::sin(o.timer*18)); for(float yy=105;yy<GROUND_Y;yy+=34) box(w,cx-3,yy,6,18,{255,230,60,(std::uint8_t)a}); } else { float x0=cx,y0=100; for(int k=1;y0<GROUND_Y;k++){float x1=cx+((k%2)?18:-18),y1=std::min(y0+55.f,GROUND_Y),out[]={x0-9,y0,x0+9,y0,x1+9,y1,x1-9,y1},in[]={x0-3,y0,x0+3,y0,x1+3,y1,x1-3,y1}; polyAdd(w,4,out,{110,220,255,210}); poly(w,4,in,sf::Color::White); x0=x1; y0=y1;} box(w,-30,-30,1060,660,{220,245,255,55}); } }
+void drawCrane(sf::RenderWindow& w, const Obstacle& o) { float cx=0,cy=0,ang=cranePos(o,cx,cy),ax=o.x+o.w/2; sf::RectangleShape rp({3,o.h}); rp.setOrigin({1.5f,0}); rp.setPosition({ax,0}); rp.setRotation(sf::radians(-ang)); rp.setFillColor(mix({60,60,70},{210,215,230},look.night)); w.draw(rp); box(w,ax-16,0,32,10,{90,95,110}); sf::Color wd(150,80,20); box(w,cx-28,cy-28,56,56,{220,130,40}); box(w,cx-28,cy-28,56,7,wd); box(w,cx-28,cy+21,56,7,wd); box(w,cx-3,cy-28,6,56,wd); }
+void drawDrone(sf::RenderWindow& w, const Obstacle& o) { float cx=o.x+o.w/2, sp=((int)(o.timer*30)%2)?50:36; sf::Color dk=mix({45,50,60},{200,205,225},look.night); box(w,o.x,o.y+8,o.w,14,dk); box(w,cx-3,o.y+2,6,8,dk); box(w,cx-sp/2,o.y,sp,3,dk); ball(w,cx,o.y+15,3.5f,((int)(o.timer*5)%2)?sf::Color(255,40,40):sf::Color(120,20,20)); }
+void drawObstacles(sf::RenderWindow& w) {
+    for (const Obstacle& o : obs) if (o.type==O_WIND) { box(w,o.x,o.y,o.w,o.h,{120,220,255,32}); box(w,o.x,o.y,o.w,2,{160,235,255,120}); box(w,o.x,o.y+o.h-2,o.w,2,{160,235,255,120}); for(int k=0;k<5;k++){float off=std::fmod(o.timer*140+k*37,o.h-28); box(w,o.x+30+k*48,(o.dir>0?o.y+14+off:o.y+o.h-14-off)-14,3,28,{220,245,255,190});} }
+    for (const Obstacle& o : obs) { if(o.type==O_TOWER)drawGroundTower(w,o.x,o.y,o.h); else if(o.type==O_GATE){drawBlock(w,o.x,0,o.y);drawBlock(w,o.x,o.y+o.h,GROUND_Y-o.y-o.h);box(w,o.x-4,o.y-8,TOWER_W+8,8,{255,195,40});box(w,o.x-4,o.y+o.h,TOWER_W+8,8,{255,195,40});} else if(o.type==O_CLOUD)drawStormCloud(w,o); else if(o.type==O_BIRD)drawBird(w,o); else if(o.type==O_DRONE)drawDrone(w,o); else if(o.type==O_CRANE)drawCrane(w,o); else if(o.type==O_BOLT)drawBolt(w,o); }
+}
+void drawBoss(sf::RenderWindow& w) {
+    if (bossT <= 0) return; float yo=-(1-std::min(1.f,std::min(BOSS_LEN-bossT,bossT)))*230, hf=std::min(1.f,bossHitT*10)*0.7f;
+    cloud(w,130,128+yo,4.6f,mix(mix({32,34,48},{75,82,120},look.night),sf::Color::White,hf)); cloud(w,190,118+yo,3.4f,mix(mix({48,52,70},{105,112,155},look.night),sf::Color::White,hf));
+    for (int s=0;s<2;s++) { float d=s?1:-1,ex=330+s*150,ey=62+yo,ox=ex+d*24,ix=ex-d*24,br[]={ox,ey-44,ix,ey-24,ix,ey-14,ox,ey-34}; ball(w,ex,ey,20,sf::Color::White); ball(w,ex-d*5,ey+3,9,{235,30,30}); poly(w,4,br,{20,20,30}); if (bossHp<bossMaxHp*0.5f) glow(w,ex,ey,34+5*std::sin(bgTime*12),{255,40,40,90}); }
+}
+const sf::Color POW_COL[NPW] = {{60,150,255},{170,90,230},{230,70,70},{50,190,90},{255,180,40}};
+const char* POW_LETTER[NPW] = {"S","T","M","x2","W"};
+void spawnCoinLine(float x, float y, int n, bool wave) { for (int i=0;i<n;i++) { float cy=std::clamp(y+(wave?45*std::sin(i*0.9f):0),70.f,500.f); if(obstaclesHit({{x+i*42-12,cy-12},{24,24}}))continue; for(int j=0;j<80;j++)if(!cn[j].alive){cn[j]={x+i*42,cy,0,true};break;} } }
+void updatePickups(float dt, float scroll) {
+    tCoin -= dt; tPower -= dt;
+    if (tCoin<=0) { spawnCoinLine(1050,rnd(110,470),4+rand()%4,rand()%2==0); tCoin=rnd(3,5); }
+    if (tPower<=0) { for(int j=0;j<4;j++)if(!pw[j].alive){float y=rnd(90,470);for(int t=0;t<6&&obstaclesHit({{1030,y-16},{40,32}});t++)y=rnd(90,470);pw[j]={1050,y,0,rand()%NPW,true};break;} tPower=rnd(11,16); }
+    for (int j=0;j<80;j++) if (cn[j].alive) {
+        Coin& c=cn[j]; c.t+=dt; c.x-=scroll*dt;
+        for(int i=0;i<2;i++)if(pl[i].alive&&pl[i].magnet>0){float dx=(pl[i].x-62)-c.x,dy=pl[i].y-c.y,d=std::hypot(dx,dy);if(d<230&&d>1){c.x+=dx/d*420*dt;c.y+=dy/d*420*dt;}}
+        sf::FloatRect r({c.x-12,c.y-12},{24,24});
+        for(int i=0;i<2;i++)if(pl[i].alive&&(touches(r,bodyBox(pl[i]))||touches(r,wingBox(pl[i])))){c.alive=false;coins++;runStat[S_COINS]++;addNova(0.015f);score+=(doubleT>0)?10:5;addText(c.x,c.y-10,"+1",{255,210,40});playSfx(SF_COIN);for(int q=0;q<5;q++)addPart(c.x,c.y,rnd(-90,90),rnd(-90,90),0.4f,4,{255,230,90});break;}
+        if (c.x<-30) c.alive=false;
+    }
+    for (int j=0;j<4;j++) if (pw[j].alive) {
+        Power& q=pw[j]; q.t+=dt; q.x-=scroll*dt; float qy=q.y+6*std::sin(q.t*3); sf::FloatRect r({q.x-18,qy-18},{36,36});
+        for(int i=0;i<2;i++)if(pl[i].alive&&(touches(r,bodyBox(pl[i]))||touches(r,wingBox(pl[i])))){runStat[S_POWER]++;playSfx(SF_POWER);const char* nm[NPW]={"SHIELD!","SLOW-MO!","MAGNET!","2x SCORE!","WINGMAN!"};if(q.kind==P_SHIELD)pl[i].shield=15;else if(q.kind==P_MAGNET)pl[i].magnet=8;else if(q.kind==P_SLOW)slowT=5;else if(q.kind==P_DOUBLE)doubleT=10;else pl[i].wingman=12;addText(q.x,qy-24,nm[q.kind],POW_COL[q.kind]);q.alive=false;break;}
+        if (q.x<-40) q.alive=false;
+    }
+}
+void drawCoin(sf::RenderWindow& w, float x, float y, float r, float sq) { sf::CircleShape s(r); s.setOrigin({r,r}); s.setPosition({x,y}); s.setScale({sq,1}); s.setFillColor({255,205,40}); s.setOutlineColor({190,130,10}); s.setOutlineThickness(2); w.draw(s,sf::RenderStates(gXf)); }
+void drawPowerIcon(sf::RenderWindow& w, sf::Font& f, int kind, float x, float y) { sf::Color c=POW_COL[kind]; ball(w,x,y,23,{c.r,c.g,c.b,70}); ball(w,x,y,17,c); ring(w,x,y,17,3,sf::Color::White); center(w,f,POW_LETTER[kind],18,x,y,sf::Color::White); }
+void drawPickups(sf::RenderWindow& w, sf::Font& f) { for(int j=0;j<80;j++)if(cn[j].alive){glow(w,cn[j].x,cn[j].y,19,{255,190,40,40});drawCoin(w,cn[j].x,cn[j].y,11,std::max(0.2f,std::fabs(std::cos(cn[j].t*4))));} for(int j=0;j<4;j++)if(pw[j].alive)drawPowerIcon(w,f,pw[j].kind,pw[j].x,pw[j].y+6*std::sin(pw[j].t*3)); }
+void fireNova(int who) {
+    if (who<0||who>1||!pl[who].alive||nova<1.f) return; nova=0; novaFlash=1; hitStop=std::max(hitStop,0.18f); shake=0.8f; runStat[S_NOVA]=1; playSfx(SF_NOVA);
+    float cx=pl[who].x-62, cy=pl[who].y; int pts=0; addFlash(cx,cy,700,{255,255,255}); addShock(cx,cy,1000,{255,255,255}); addShock(cx,cy,650,{255,215,90}); addShock(cx,cy,380,{110,225,255});
+    for (const EnemyPlane& e:enemies) { burst(e.x,e.y,30,340); addDebris(e.x,e.y,6); addFlash(e.x,e.y,90,{255,190,80}); pts+=25*combo; runStat[S_KILLS]++; } enemies.clear();
+    for (int i=(int)bullets.size()-1; i>=0; i--) if (bullets[i].owner<0) { burst(bullets[i].x,bullets[i].y,8,160); pts+=5; bullets.erase(bullets.begin()+i); }
+    for (int i=(int)obs.size()-1; i>=0; i--) if (obs[i].type==O_BIRD||obs[i].type==O_DRONE||obs[i].type==O_CLOUD) { burst(obs[i].x+obs[i].w/2,obs[i].y+obs[i].h/2,12,220); pts+=10; obs.erase(obs.begin()+i); }
+    if (bossT>0) { bossHp-=8; bossHitT=0.2f; addFlash(400,80,200,{255,120,120}); if(bossHp<=0)defeatBoss(); }
+    score+=pts; if(pts>0)addText(cx,cy-70,"NOVA +"+std::to_string(pts),{130,235,255}); for(int i=0;i<2;i++)if(pl[i].alive)pl[i].inv=std::max(pl[i].inv,0.8f); checkMissions();
+}
+void tryBoost(int i) { if (i<0||i>1||!pl[i].alive||pl[i].boostCd>0) return; pl[i].boostT=BOOST_TIME; pl[i].boostCd=boostCdTime(); playSfx(SF_BOOST); addShock(pl[i].x-55,pl[i].y,75,{140,230,255}); for(int q=0;q<10;q++)addPart(pl[i].x-134,pl[i].y+1,rnd(-300,-100),rnd(-40,40),0.35f,5,{255,190,60}); }
+void tryRoll(int i) { if (i<0||i>1||!pl[i].alive||pl[i].rollCd>0) return; pl[i].rollT=ROLL_TIME; pl[i].rollCd=ROLL_CD; pl[i].inv=std::max(pl[i].inv,ROLL_TIME+0.1f); playSfx(SF_NEAR); addShock(pl[i].x-62,pl[i].y,58,{180,240,255}); addText(pl[i].x-62,pl[i].y-38,"EVADE!",{140,235,255}); }
+void tryGun(int i) { if (i<0||i>1||!pl[i].alive||pl[i].gunCd>0) return; pl[i].gunCd=GUN_CD; if(overdriveT>0){bullets.push_back({pl[i].x+6,pl[i].y-5,1020,pl[i].vy*0.1f,i,false,1.5f});bullets.push_back({pl[i].x+6,pl[i].y+7,1020,pl[i].vy*0.1f,i,false,1.5f});} else bullets.push_back({pl[i].x+6,pl[i].y+2,950,pl[i].vy*0.12f,i,false,1.5f}); addPart(pl[i].x+8,pl[i].y+2,220,rnd(-30,30),0.08f,4,{255,240,120}); playSfx(SF_GUN); }
+void tryMissile(int i) { if (i<0||i>1||!pl[i].alive||pl[i].misCd>0) return; pl[i].misCd=missileCdTime(); bullets.push_back({pl[i].x-82,pl[i].y+34,650,0,i,true,3}); addPart(pl[i].x-105,pl[i].y+34,-180,rnd(-25,25),0.3f,6,{255,170,50}); playSfx(SF_MISSILE); }
+void tryFlare(int i) { if (i<0||i>1||!pl[i].alive||pl[i].flareCd>0) return; pl[i].flareCd=FLARE_CD; playSfx(SF_BOOST); for(int k=0;k<5;k++)flares.push_back({pl[i].x-80,pl[i].y+10,rnd(-180,-60),rnd(-120,140),1.4f}); }
+void hurtPlayer(int i) { Player& p=pl[i]; for(Obstacle& o:obs)o.zone&=~(1<<i); if(p.shield>0){p.shield=0;p.inv=1;shake=0.35f;addText(p.x-60,p.y-45,"SHIELD BROKEN",{110,190,255});playSfx(SF_HIT);return;} combo=1;comboT=0;overdriveT=0;p.lives--;p.inv=1.8f;shake=0.5f;hitFlash=1;playSfx(SF_HIT);burst(p.x-60,p.y,18,260); if(p.lives<=0){p.alive=false;shake=0.9f;hitStop=std::max(hitStop,0.25f);playSfx(SF_CRASH);burst(p.x-60,p.y,70,420);addFlash(p.x-60,p.y,230,{255,190,90});addDebris(p.x-60,p.y,10);} }
+void updatePlayer(int i, float dt) {
+    Player& p = pl[i]; if (!p.alive) return; float dx=0, dy=0; bool wasd=(i==0), arr=(i==1||numPlayers==1);
+    if (wasd) { if(sf::Keyboard::isKeyPressed(K::W))dy--; if(sf::Keyboard::isKeyPressed(K::S))dy++; if(sf::Keyboard::isKeyPressed(K::A))dx--; if(sf::Keyboard::isKeyPressed(K::D))dx++; }
+    if (arr) { if(sf::Keyboard::isKeyPressed(K::Up))dy--; if(sf::Keyboard::isKeyPressed(K::Down))dy++; if(sf::Keyboard::isKeyPressed(K::Left))dx--; if(sf::Keyboard::isKeyPressed(K::Right))dx++; }
+    if (sf::Joystick::isConnected((unsigned)i)) { float jx=sf::Joystick::getAxisPosition((unsigned)i,sf::Joystick::Axis::X)/100.f,jy=sf::Joystick::getAxisPosition((unsigned)i,sf::Joystick::Axis::Y)/100.f; if(std::fabs(jx)>0.25f)dx+=jx; if(std::fabs(jy)>0.25f)dy+=jy; }
+    float len=std::hypot(dx,dy); if(len>1){dx/=len;dy/=len;} float sp=(p.boostT>0)?640:(p.rollT>0?480:320); if(p.boostT>0&&dx==0&&dy==0)dx=1;
+    float f=std::min(1.f,10*dt); p.vx+=(dx*sp-p.vx)*f; p.vy+=(dy*sp-p.vy)*f; p.x=std::clamp(p.x+p.vx*dt,150.f,990.f); p.y=std::clamp(p.y+p.vy*dt+windAt(bodyBox(p))*dt,50.f,505.f);
+    p.tilt+=((p.rollT>0?std::sin(p.rollT*25)*28:std::clamp(p.vy*0.04f,-16.f,16.f))-p.tilt)*f;
+    p.boostT=std::max(0.f,p.boostT-dt); p.boostCd=std::max(0.f,p.boostCd-dt); p.rollT=std::max(0.f,p.rollT-dt); p.rollCd=std::max(0.f,p.rollCd-dt);
+    p.gunCd=std::max(0.f,p.gunCd-dt); p.misCd=std::max(0.f,p.misCd-dt); p.flareCd=std::max(0.f,p.flareCd-dt); p.inv=std::max(0.f,p.inv-dt); p.shield=std::max(0.f,p.shield-dt); p.magnet=std::max(0.f,p.magnet-dt);
+    if (p.wingman>0) { p.wingman=std::max(0.f,p.wingman-dt); if((p.wingFire-=dt)<=0){p.wingFire=0.25f;bullets.push_back({p.x-42,p.y-54,920,0,i,false,1.3f});} }
+    if ((p.trail-=dt)<=0) { p.trail=0.035f; addPart(p.x-134,p.y+1,-scrollSpeed*0.6f,rnd(-12,12),0.7f,5,overdriveT>0?sf::Color(255,220,80,190):sf::Color(255,255,255,170)); if(std::fabs(p.tilt)>6||p.boostT>0)addPart(p.x-102,p.y+34,-scrollSpeed*0.8f,0,0.45f,2.5f,{220,240,255,150}); if(p.boostT>0)addPart(p.x-136,p.y+1,-scrollSpeed,rnd(-20,20),0.4f,6,{255,160,40}); }
+    if ((i==0&&sf::Keyboard::isKeyPressed(K::F))||((i==1||numPlayers==1)&&sf::Keyboard::isKeyPressed(K::Slash))) tryGun(i);
+}
+void openCrate(Crate& c) { c.alive=false; burst(c.x,c.y,20,220); addShock(c.x,c.y,65,{110,245,160}); if(c.rescue){for(int p=0;p<2;p++)if(!pl[p].alive){pl[p].alive=true;pl[p].lives=2;pl[p].inv=2;pl[p].y=260;}addText(c.x,c.y-20,"PARTNER REVIVED!",{90,245,130});playSfx(SF_TIER);} else{coins+=5;runStat[S_COINS]+=5;score+=30;playSfx(SF_POWER);addText(c.x,c.y-20,"SUPPLY +5 COINS!",{255,220,70});if(rand()%3==0)for(int p=0;p<2;p++)if(pl[p].alive&&pl[p].lives<maxLives()){pl[p].lives++;addText(pl[p].x-60,pl[p].y-45,"+1 LIFE!",{255,110,130});break;}} }
+void updateCombat(float dt, float wdt, int level) {
+    if (numPlayers==2&&anyAlive()&&(!pl[0].alive||!pl[1].alive)&&!crate.alive&&(reviveT+=dt)>8) { reviveT=0; crate={rnd(600,900),-30,65,true,true}; }
+    if (!crate.alive&&(tCrate-=wdt)<=0) { tCrate=rnd(20,28); crate={rnd(620,920),-30,75,true,false}; }
+    if (crate.alive) { crate.x-=scrollSpeed*0.25f*wdt; crate.y+=crate.vy*dt; sf::FloatRect cr({crate.x-18,crate.y-18},{36,36}); for(int p=0;p<2;p++)if(pl[p].alive&&(touches(cr,bodyBox(pl[p]))||touches(cr,wingBox(pl[p])))){openCrate(crate);break;} if(crate.y>GROUND_Y)crate.alive=false; }
+    for (std::size_t i=0;i<flares.size();) { Flare& fl=flares[i]; fl.life-=dt; fl.vy+=120*dt; fl.x+=fl.vx*dt; fl.y+=fl.vy*dt; addPart(fl.x,fl.y,rnd(-30,30),rnd(-30,30),0.25f,4.5f,{255,195,70}); if(fl.life<=0)flares.erase(flares.begin()+i);else i++; }
+    if ((tEnemy-=wdt)<=0&&bossT<=0&&anyAlive()) { int kind=(level>=2&&rand()%3==0)?1:0; float hp=(kind==1)?4:2; enemies.push_back({1140,rnd(90,460),(kind==1)?-210:-270-level*15.f,0,hp,hp,rnd(1,2),kind}); tEnemy=std::max(1.8f,4.5f-level*0.4f)*DIFF_WAIT[diff]; }
+    if ((tSam-=wdt)<=0&&level>=2&&bossT<=0&&anyAlive()) { float sx=rnd(420,900); bullets.push_back({sx,GROUND_Y-8,0,-330,-2,true,6}); for(int q=0;q<12;q++)addPart(sx,GROUND_Y,rnd(-70,70),rnd(-160,-30),0.6f,rnd(6,11),{235,235,240,200}); showMsg(2,"MISSILE LAUNCH!   FLARES (C) or SHOOT IT!",2.2f,{255,95,70}); playSfx(SF_MISSILE); tSam=std::max(7.f,rnd(12,17)-level)*DIFF_WAIT[diff]; }
+    for (std::size_t i=0;i<enemies.size();) {
+        EnemyPlane& e=enemies[i]; int tgt=(numPlayers==2&&pl[1].alive&&(!pl[0].alive||std::fabs(pl[1].y-e.y)<std::fabs(pl[0].y-e.y)))?1:0;
+        if (pl[tgt].alive&&e.x>pl[tgt].x-30) { float ts=(e.kind==1)?115:155; e.vy+=(std::clamp((pl[tgt].y-e.y)*2.5f,-ts,ts)-e.vy)*std::min(1.f,4*wdt); }
+        e.x+=e.vx*wdt; e.y=std::clamp(e.y+e.vy*wdt,55.f,500.f); if(e.kind==1&&(e.shotCd-=wdt)<=0&&e.x>300&&e.x<960){e.shotCd=1.6f;bullets.push_back({e.x-55,e.y,-520,0,-1,false,2.5f});playSfx(SF_GUN);}
+        sf::FloatRect er({e.x-46,e.y-14},{92,28}); bool hitP=false; for(int p=0;p<2;p++)if(pl[p].alive&&pl[p].inv<=0&&(touches(er,bodyBox(pl[p]))||touches(er,wingBox(pl[p])))){hurtPlayer(p);hitP=true;break;}
+        if(hitP){burst(e.x,e.y,28,300);addDebris(e.x,e.y,6);addShock(e.x,e.y,65,{255,160,60});addFlash(e.x,e.y,80,{255,170,70});enemies.erase(enemies.begin()+i);continue;} if(e.x<-90)enemies.erase(enemies.begin()+i);else i++;
+    }
+    for (std::size_t i=0;i<bullets.size();) {
+        Bullet& b=bullets[i]; float bdt=(b.owner<0)?wdt:dt; b.life-=bdt;
+        if (b.owner==-2) { float tx=pl[0].x-62,ty=pl[0].y,bd=99999; bool dc=false; for(const Flare& f:flares){float d=std::hypot(f.x-b.x,f.y-b.y);if(d<bd){bd=d;tx=f.x;ty=f.y;dc=true;}} if(!dc)for(int p=0;p<2;p++)if(pl[p].alive){float d=std::hypot(pl[p].x-62-b.x,pl[p].y-b.y);if(d<bd){bd=d;tx=pl[p].x-62;ty=pl[p].y;}} float cur=std::atan2(b.vy,b.vx),df=std::atan2(ty-b.y,tx-b.x)-cur; while(df>3.1416f)df-=6.2832f; while(df<-3.1416f)df+=6.2832f; cur+=std::clamp(df,-2.2f*bdt,2.2f*bdt); b.vx=320*std::cos(cur); b.vy=320*std::sin(cur); addPart(b.x-16*std::cos(cur),b.y-16*std::sin(cur),rnd(-20,20),rnd(-20,20),0.4f,5,{255,170,60,200}); }
+        if (b.missile&&b.owner>=0&&!enemies.empty()) { float bd=99999,ty=b.y; for(const EnemyPlane& e:enemies)if(e.x>=b.x){float d=std::hypot(e.x-b.x,e.y-b.y);if(d<bd){bd=d;ty=e.y;}} if(bd<600)b.vy+=std::clamp((ty-b.y)*5,-260.f,260.f)*dt; }
+        b.x+=b.vx*bdt; b.y+=b.vy*bdt; if(b.missile&&b.owner>=0)addPart(b.x-14,b.y,-120,rnd(-20,20),0.25f,4,{220,220,230,190});
+        bool rm=(b.life<=0||b.x>1060||b.x<-40||b.y<0||b.y>GROUND_Y); sf::FloatRect br=b.missile?sf::FloatRect({b.x-12,b.y-5},{24,10}):sf::FloatRect({b.x-7,b.y-3},{14,6});
+        if (!rm&&b.owner>=0) {
+            for(std::size_t j=0;j<enemies.size();j++)if(touches(br,{{enemies[j].x-46,enemies[j].y-16},{92,32}})){enemies[j].hp-=b.missile?3:1;rm=true;if(b.missile){burst(b.x,b.y,24,280);addShock(b.x,b.y,70,{255,190,60});shake=std::max(shake,0.25f);}else addPart(b.x,b.y,rnd(-80,80),rnd(-80,80),0.25f,4,{255,220,90});if(enemies[j].hp<=0){bumpCombo();addNova(0.2f);runStat[S_KILLS]++;hitStop=std::max(hitStop,0.05f);int pts=((doubleT>0)?50:25)*combo;score+=pts;addText(enemies[j].x,enemies[j].y-20,"DOWN +"+std::to_string(pts)+(combo>1?" x"+std::to_string(combo):""),{255,210,60});burst(enemies[j].x,enemies[j].y,35,340);addDebris(enemies[j].x,enemies[j].y,7);addShock(enemies[j].x,enemies[j].y,85,{255,120,40});addFlash(enemies[j].x,enemies[j].y,120,{255,200,100});playSfx(SF_CRASH);for(int c=0;c<80;c++)if(!cn[c].alive){cn[c]={enemies[j].x,enemies[j].y,0,true};break;}enemies.erase(enemies.begin()+j);}else playSfx(SF_HIT);break;}
+            if(!rm&&crate.alive&&!crate.rescue&&touches(br,{{crate.x-18,crate.y-18},{36,36}})){openCrate(crate);rm=true;}
+            if(!rm&&bossT>0&&touches(br,{{160,15},{480,115}})){bossHp-=b.missile?3:1;bossHitT=0.1f;rm=true;addPart(b.x,b.y,rnd(-80,80),rnd(-80,80),0.3f,5,{255,180,60});if(bossHp<=0)defeatBoss();else playSfx(SF_HIT);}
+            if(!rm)for(std::size_t j=0;j<obs.size();j++)if(obs[j].type==O_DRONE&&touches(br,obstacleBox(obs[j]))){bumpCombo();addNova(0.1f);int pts=((doubleT>0)?30:15)*combo;score+=pts;addText(obs[j].x,obs[j].y-15,"DRONE +"+std::to_string(pts),{150,235,255});burst(obs[j].x+20,obs[j].y+10,20,240);addDebris(obs[j].x+20,obs[j].y+10,4);playSfx(SF_HIT);obs.erase(obs.begin()+j);rm=true;break;}
+        } else if (!rm&&b.owner<0) {
+            for(const Flare& fl:flares)if(std::hypot(fl.x-b.x,fl.y-b.y)<34){rm=true;addPart(b.x,b.y,0,0,0.2f,6,{255,220,120});if(b.owner==-2){burst(b.x,b.y,22,260);addFlash(b.x,b.y,80,{255,190,80});score+=20;addText(b.x,b.y-24,"DECOYED +20",{255,210,90});playSfx(SF_HIT);}break;}
+            if(!rm)for(int p=0;p<2;p++)if(pl[p].alive&&pl[p].inv<=0&&(touches(br,bodyBox(pl[p]))||touches(br,wingBox(pl[p])))){hurtPlayer(p);rm=true;if(b.owner==-2){burst(b.x,b.y,24,280);addFlash(b.x,b.y,90,{255,170,70});}break;}
+            if(!rm&&b.owner==-2)for(Bullet& o:bullets)if(o.owner>=0&&!o.missile&&o.life>0&&touches({{o.x-8,o.y-4},{16,8}},br)){o.life=0;rm=true;score+=20;addNova(0.08f);addText(b.x,b.y-24,"SHOT DOWN +20",{150,235,255});burst(b.x,b.y,22,260);addFlash(b.x,b.y,80,{255,190,80});playSfx(SF_HIT);break;}
+        }
+        if (rm) bullets.erase(bullets.begin()+i); else i++;
+    }
+}
+void drawCombat(sf::RenderWindow& w, sf::Font& f) {
+    if (crate.alive) { sf::Color cc=crate.rescue?sf::Color(55,215,115):sf::Color(235,165,50); float ch[]={crate.x-22,crate.y-26,crate.x,crate.y-44,crate.x+22,crate.y-26}; poly(w,3,ch,{240,245,255}); box(w,crate.x-14,crate.y-26,2,16,{200,210,225}); box(w,crate.x+12,crate.y-26,2,16,{200,210,225}); panel(w,crate.x-16,crate.y-12,32,26,cc,sf::Color::White,1.5f); center(w,f,crate.rescue?"+":"$",18,crate.x,crate.y+1,sf::Color::White); }
+    for (const EnemyPlane& e:enemies) { drawEnemyPlane(w,e.x,e.y,e.kind,e.hp/e.maxHp); if(e.x>1000&&((int)(bgTime*12)%2==0)){ball(w,976,e.y,14,{220,35,45,210});ring(w,976,e.y,14,2,sf::Color::White);center(w,f,"!",18,976,e.y,sf::Color::White);} }
+    for (const Bullet& b:bullets) {
+        if (b.owner==-1) { glow(w,b.x,b.y,14,{255,60,60,90}); ball(w,b.x,b.y,6,{255,60,60,110}); ball(w,b.x,b.y,3.5f,{255,190,190}); }
+        else if (b.owner==-2) { float ang=std::atan2(b.vy,b.vx); sf::RectangleShape r({28,8}); r.setOrigin({14,4}); r.setPosition({b.x,b.y}); r.setRotation(sf::radians(ang)); r.setFillColor({205,60,60}); w.draw(r); glow(w,b.x-16*std::cos(ang),b.y-16*std::sin(ang),12,{255,150,40,150}); ball(w,b.x+14*std::cos(ang),b.y+14*std::sin(ang),5,{250,250,250}); if((int)(bgTime*10)%2==0)ring(w,b.x,b.y,24,2,{255,70,60,200}); }
+        else if (b.missile) { glow(w,b.x-14,b.y,13,{255,160,50,110}); box(w,b.x-12,b.y-2.5f,20,5,{240,240,245}); float tp[]={b.x+8,b.y-2.5f,b.x+15,b.y,b.x+8,b.y+2.5f}; poly(w,3,tp,{220,40,40}); box(w,b.x-12,b.y-4.5f,4,9,{90,95,105}); }
+        else { glow(w,b.x,b.y,11,{255,220,80,70}); box(w,b.x-8,b.y-1.5f,16,3,overdriveT>0?sf::Color(255,215,50):sf::Color(255,235,90)); box(w,b.x+2,b.y-1,6,2,sf::Color::White); }
+    }
+}
+void drawHeart(sf::RenderWindow& w, float cx, float cy, float s, sf::Color c) { ball(w,cx-s*0.5f,cy-s*0.3f,s*0.55f,c); ball(w,cx+s*0.5f,cy-s*0.3f,s*0.55f,c); float tr[]={cx-s*1.03f,cy-s*0.05f,cx+s*1.03f,cy-s*0.05f,cx,cy+s*1.1f}; poly(w,3,tr,c); }
+void drawPlayer(sf::RenderWindow& w, sf::Font& f, int i) {
+    const Player& p = pl[i]; if (!p.alive || (p.inv > 0 && ((int)(p.inv * 12) % 2 == 1))) return;
+    if (look.night>0.35f) { float bm[]={p.x+2,p.y+1,p.x+250,p.y-46,p.x+250,p.y+48}; polyAdd(w,3,bm,{210,240,255,(std::uint8_t)(look.night*48)}); }
+    if (overdriveT>0) ring(w,p.x-62,p.y,82+4*std::sin(bgTime*16),2,{255,215,60,180});
+    if (p.boostT>0) glow(w,p.x-140,p.y+1,30,{120,200,255,110});
+    plane(w, p.x, p.y, p.skin, p.tilt, p.boostT > 0 ? 2.2f : 0.9f);
+    if (p.wingman>0) { float wx=p.x-55, wy=p.y-54+std::sin(bgTime*6)*5, wd[]={wx-12,wy-6,wx+16,wy,wx-12,wy+6}; poly(w,3,wd,{255,200,60}); glow(w,wx-14,wy,9,{100,220,255,140}); }
+    if (p.shield>0) { ball(w,p.x-62,p.y,88,{90,170,255,45}); ring(w,p.x-62,p.y,88,3,{140,200,255,200}); }
+    if (p.magnet>0) ring(w,p.x-62,p.y,100+6*std::sin(bgTime*8),2,{230,70,70,140});
+    if (nova>=1) ring(w,p.x-62,p.y,96+6*std::sin(bgTime*10),2,{130,235,255,(std::uint8_t)(150+90*std::sin(bgTime*10))});
+    if (numPlayers==2) label(w,f,i==0?"P1":"P2",18,p.x-75,p.y-56,i==0?sf::Color(120,215,255):sf::Color(110,245,160));
+}
+void chip(sf::RenderWindow& w, sf::Font& f, float x, float y, const std::string& nm, float frac, sf::Color c) { panel(w,x-2,y-2,124,20,{10,15,32,195},{80,140,210,160},1); box(w,x,y,120*std::min(1.f,frac),16,c); center(w,f,nm,13,x+60,y+8,sf::Color::White); }
+void drawRadar(sf::RenderWindow& w, sf::Font& f) {
+    float rx=830, ry=486, rw=156, rh=56; panel(w,rx,ry,rw,rh,{8,16,30,200},{70,200,160,180},1.5f); txt(w,f,"RADAR",10,rx+6,ry+3,{100,235,175});
+    for(int i=0;i<2;i++)if(pl[i].alive)ball(w,rx+(pl[i].x/1000)*rw,ry+(pl[i].y/GROUND_Y)*rh,3,{90,220,255});
+    for(const EnemyPlane& e:enemies)ball(w,rx+std::clamp(e.x/1200,0.f,1.f)*rw,ry+(e.y/GROUND_Y)*rh,2.8f,{255,70,70});
+    for(const Bullet& b:bullets)if(b.owner==-2)ball(w,rx+std::clamp(b.x/1000,0.f,1.f)*rw,ry+(b.y/GROUND_Y)*rh,2.5f,{255,220,60});
+    if(crate.alive)ball(w,rx+std::clamp(crate.x/1000,0.f,1.f)*rw,ry+(crate.y/GROUND_Y)*rh,3,{90,255,130});
+    if(bossT>0)ball(w,rx+rw*0.45f,ry+10,5,{255,50,160});
+}
+void drawHud(sf::RenderWindow& w, sf::Font& f) {
+    int tier = score / 200; panel(w,12,8,255,96,{10,15,34,185},{70,185,255,180},1.5f);
+    txt(w,f,"SCORE: "+std::to_string((int)dispScore),26,22,12,sf::Color::White); txt(w,f,"BEST: "+std::to_string(best),20,22,46,{255,215,90});
+    txt(w,f,"TIER "+std::to_string(tier+1)+" - "+STAGE[tier%5],18,22,74,{120,220,255});
+    panel(w,412,8,176,36,{10,15,34,185},{255,205,60,180},1.5f); drawCoin(w,434,26,11,1); txt(w,f,"x "+std::to_string(coins),22,456,12,{255,225,110});
+    int row=0;
+    if (overdriveT>0) { chip(w,f,440,50+row*22,"OVERDRIVE!",overdriveT/6,{255,200,40}); row++; } else if (combo>1) { chip(w,f,440,50+row*22,"COMBO x"+std::to_string(combo),comboT/3.5f,{245,145,30}); row++; }
+    if (slowT>0) { chip(w,f,440,50+row*22,"SLOW-MO",slowT/5,{150,80,220}); row++; } if (doubleT>0) { chip(w,f,440,50+row*22,"2x SCORE",doubleT/10,{40,170,80}); row++; }
+    if (bossT>0) { float y=50+row*22; panel(w,378,y-2,244,20,{15,10,25,210},{255,70,70},1.5f); box(w,380,y,240*(bossHp/bossMaxHp),16,{225,50,55}); center(w,f,"STORM TITAN HP",13,500,y+8,sf::Color::White); }
+    for (int i=0;i<numPlayers;i++) {
+        bool rt=(i==1); const Player& p=pl[i]; if (numPlayers==2) label(w,f,i==0?"P1":"P2",16,rt?940:20,108,{120,220,255});
+        for (int j=0;j<maxLives();j++) drawHeart(w,rt?960.f-j*36:35.f+j*36,146,13,j<p.lives?sf::Color(245,55,75):sf::Color(80,90,115,140));
+        if (!p.alive) continue; float bx=rt?855:20, bf=1-p.boostCd/boostCdTime(), mf=1-p.misCd/missileCdTime(), ff=1-p.flareCd/FLARE_CD, rf=1-p.rollCd/ROLL_CD;
+        panel(w,bx-2,168,124,14,{10,15,32,195},{70,180,255,140},1); box(w,bx,170,120*bf,10,bf>=1?sf::Color(50,215,125):sf::Color(245,165,45)); center(w,f,"BOOST",11,bx+60,175,sf::Color::White);
+        panel(w,bx-2,186,124,14,{10,15,32,195},{255,95,95,140},1); box(w,bx,188,120*mf,10,mf>=1?sf::Color(235,65,75):sf::Color(120,125,145)); center(w,f,"MISSILE",11,bx+60,193,sf::Color::White);
+        panel(w,bx-2,204,124,14,{10,15,32,195},{255,200,80,140},1); box(w,bx,206,120*ff,10,ff>=1?sf::Color(255,195,55):sf::Color(120,125,145)); center(w,f,"FLARE (C)",11,bx+60,211,sf::Color::White);
+        panel(w,bx-2,222,124,14,{10,15,32,195},{130,235,255,160},1); box(w,bx,224,120*nova,10,nova>=1?mix({90,220,255},sf::Color::White,0.5f+0.5f*std::sin(bgTime*10)):sf::Color(60,140,200)); center(w,f,rt?"NOVA (ENTER)":"NOVA (V)",11,bx+60,229,sf::Color::White);
+        panel(w,bx-2,240,124,14,{10,15,32,195},{160,245,190,140},1); box(w,bx,242,120*rf,10,rf>=1?sf::Color(80,220,180):sf::Color(120,125,145)); center(w,f,rt?"EVADE (\\)":"EVADE (E)",11,bx+60,247,sf::Color::White);
+        int r=0; if(p.shield>0){chip(w,f,bx,262+r*22,"SHIELD",p.shield/15,{60,140,240});r++;} if(p.magnet>0){chip(w,f,bx,262+r*22,"MAGNET",p.magnet/8,{220,70,70});r++;} if(p.wingman>0)chip(w,f,bx,262+r*22,"WINGMAN",p.wingman/12,{255,180,40});
+    }
+    drawRadar(w, f);
+}
+struct Btn { float cx, cy, w, h; };
+const Btn MENU_BTN[8] = {{500,225,260,46},{500,280,260,46},{500,335,260,46},{500,390,260,46},{500,445,260,46},{240,500,220,38},{500,500,220,38},{760,500,220,38}};
+const Btn BACK_BTN={100,560,150,40}, NEXT_BTN={900,560,150,40}, PREV_BTN={740,560,150,40}, SHOP_BTN={500,525,300,46}, TAB_BTN[2]={{405,92,180,32},{595,92,180,32}};
+const char* MENU_TXT[5] = {"PLAY","SHOP","HOW TO PLAY","SCORES","EXIT"};
+int shopCount() { return shopTab == 0 ? NSK : NUP; }
+float shopCx(int i) { return (shopTab == 0 ? 100.f : 200.f) + i * 200; }
+bool inBtn(const Btn& b, sf::Vector2f m) { return std::fabs(m.x - b.cx) < b.w / 2 && std::fabs(m.y - b.cy) < b.h / 2; }
+void drawBtn(sf::RenderWindow& w, sf::Font& f, const Btn& b, const std::string& t, bool hot, int sz = 26) { panel(w,b.cx-b.w/2,b.cy-b.h/2,b.w,b.h,hot?sf::Color(255,195,45,240):sf::Color(14,22,48,215),hot?sf::Color(255,240,170):sf::Color(70,185,255,200),2); center(w,f,t,sz,b.cx,b.cy,hot?sf::Color(15,20,42):sf::Color(235,245,255)); }
+void drawHowTo(sf::RenderWindow& w, sf::Font& f, int page) {
+    const char* ON[8]={"GROUND TOWER","STORM CLOUD","BIRD","LIGHTNING","WIND ZONE","SLIDING GATE","CRANE","DRONE"}, *OI[8]={"Stands on the ground.\nFly over or around it.","Falls from the sky while\ndrifting. Dodge sideways.","Faster than the world.\nComes in flocks later.","Yellow dashes warn you,\nthen it strikes that line.","Harmless, but it pushes\nyour plane up or down.","Fly through the gap.\nThe gap slides up and down.","Only the swinging crate\nhurts, not the rope.","Fast flyer that bobs up/down.\nCan be shot down!"}, *PN[5]={"SHIELD","SLOW-MO","MAGNET","2x SCORE","WINGMAN"}, *PI[5]={"Absorbs one crash (15 s).","The world slows down for 5 s.","Pulls coins to you (8 s).","Double points for 10 s.","Escort drone fires (12 s)."};
+    sf::Color cy(100,215,255), sb(200,215,240), gd(255,205,70); panel(w,15,15,970,570,{12,18,40,232},{70,185,255,200},2); center(w,f,"HOW TO PLAY   ("+std::to_string(page+1)+" / 3)",34,500,45,gd);
+    if (page == 0) for (int i=0;i<8;i++) {
+        float x0=40+(i%2)*480, y0=95+(i/2)*112; panel(w,x0,y0,110,80,{22,36,68},{70,175,245,160},1.5f); Obstacle o={O_BIRD,0,0,0,0,0,0,bgTime,0,0,false,false,0};
+        if(i==0)drawGroundTower(w,x0+10,y0+36,44); else if(i==1){o.type=O_CLOUD;o.x=x0+14;o.y=y0+20;o.w=84;o.h=49;drawStormCloud(w,o);} else if(i==2){o.x=x0+35;o.y=y0+30;o.w=40;o.h=20;drawBird(w,o);} else if(i==3){cloud(w,x0+22,y0+44,0.55f,{60,60,75});float x1=x0+55,y1=y0+42;for(int k=1;k<=3;k++){float nx=x0+55+((k%2)?12:-12),ny=y1+13,sg[]={x1-4,y1,x1+4,y1,nx+4,ny,nx-4,ny};poly(w,4,sg,{110,225,255});x1=nx;y1=ny;}} else if(i==4){box(w,x0+8,y0+8,94,64,{35,70,115});for(int k=0;k<3;k++){float ax=x0+25+k*30,hd[]={ax-9,y0+32,ax,y0+16,ax+9,y0+32};box(w,ax-2,y0+28,4,36,{160,235,255});poly(w,3,hd,{160,235,255});}} else if(i==5){box(w,x0+33,y0,44,24,{62,78,108});box(w,x0+33,y0+56,44,24,{62,78,108});box(w,x0+29,y0+24,52,6,{255,200,30});box(w,x0+29,y0+50,52,6,{255,200,30});} else if(i==6){box(w,x0+53,y0,3,40,{140,150,175});box(w,x0+37,y0+40,36,36,{220,130,40});} else{o.type=O_DRONE;o.x=x0+32;o.y=y0+28;o.w=46;o.h=22;drawDrone(w,o);}
+        txt(w,f,ON[i],21,x0+125,y0+2,cy); txt(w,f,OI[i],16,x0+125,y0+34,sb);
+    } else if (page == 1) {
+        txt(w,f,"CONTROLS",26,40,85,gd); const char* ct[5]={"P1: W A S D  |  Gun: F  |  Missile: G  |  Flare: C  |  Evade: E  |  Boost: Shift/Space","P2: Arrows   |  Gun: /  |  Missile: .  |  Flare: ,  |  Evade: \\  |  Boost: RShift/RCtrl","NOVA BOMB: V (P1) / ENTER (P2) once the NOVA bar is full - clears the sky!","ESC: pause    R: restart    M: mute    BACKSPACE: main menu (when paused)","GAMEPAD: stick to move, A: boost, B: missile, X: gun, Y: flare, LB/RB: nova, START: pause"};
+        for(int i=0;i<5;i++)txt(w,f,ct[i],17,40,125+i*30,sf::Color::White); txt(w,f,"POWER-UPS AND COINS",26,40,295,gd);
+        for(int i=0;i<5;i++){float x0=40+(i%2)*480,y0=340+(i/2)*58;drawPowerIcon(w,f,i,x0+22,y0+22);txt(w,f,PN[i],19,x0+58,y0,cy);txt(w,f,PI[i],15,x0+58,y0+24,sb);}
+        drawCoin(w,542,478,15,1); txt(w,f,"COIN",19,578,456,gd); txt(w,f,"Collect coins from sky, crates, or enemies.",15,578,480,sb);
+    } else {
+        const char* rl[5]={"HEARTS: a crash costs one heart. Supply crates (shoot or touch them) can\nrepair a heart, and in 2P a green Rescue Pod revives your teammate!","COMBO & OVERDRIVE: chain kills/close calls for up to 5x COMBO.\nHit 5x to unlock 6s of TWIN CANNON OVERDRIVE!","WEAPONS, FLARES & EVADE: Gun (F), Missiles (G), Flares (C), Barrel Roll (E).\nFlares decoy SAM missiles and destroy incoming plasma shots.","BOSS: from TIER 4 the STORM TITAN appears. Shoot it down or\nsurvive 18s to win +100xCOMBO points and a coin shower!","NOVA & UPGRADES: kills, coins and close calls charge the NOVA bomb.\nSpend coins on permanent UPGRADES in the SHOP and rank up your pilot!"};
+        for(int i=0;i<5;i++){float y0=90+i*92;if(i==0)drawHeart(w,70,y0+30,20,{245,55,75});else if(i==1){ball(w,70,y0+30,28,{245,145,30});center(w,f,"x5",20,70,y0+30,sf::Color::White);}else if(i==2){ball(w,70,y0+30,28,{215,55,65});center(w,f,"F/G/C",14,70,y0+30,sf::Color::White);}else if(i==3)cloud(w,36,y0+52,0.5f,{85,95,130});else{ball(w,70,y0+30,28,{40,150,200});center(w,f,"V",24,70,y0+30,sf::Color::White);}txt(w,f,rl[i],18,130,y0+4,sf::Color::White);}
+    }
+}
+void upgIcon(sf::RenderWindow& w, int i, float x, float y) { if(i==0)drawHeart(w,x,y,24,{245,55,75}); else if(i==1)for(int k=0;k<3;k++){float c[]={x-30.f+k*22,y-20,x-10.f+k*22,y,x-30.f+k*22,y+20};poly(w,3,c,{255,200,50});} else if(i==2){box(w,x-30,y-7,50,14,{240,240,245});float tp[]={x+20,y-7,x+38,y,x+20,y+7};poly(w,3,tp,{220,40,40});box(w,x-30,y-13,9,26,{90,95,105});} else{ring(w,x,y,28,4,{110,225,255});ring(w,x,y,18,2,{255,215,90});ball(w,x,y,10,sf::Color::White);} }
+void drawShop(sf::RenderWindow& w, sf::Font& f) {
+    sf::Color gd(255,205,55), blue(70,150,220,170); panel(w,15,15,970,570,{12,18,40,232},{70,185,255,200},2);
+    center(w,f,"SHOP",36,400,48,{255,210,70}); drawCoin(w,790,52,14,1); txt(w,f,"x "+std::to_string(coins),30,815,34,{255,225,110});
+    drawBtn(w,f,TAB_BTN[0],"PLANE SKINS",shopTab==0,18); drawBtn(w,f,TAB_BTN[1],"UPGRADES",shopTab==1,18);
+    for (int i=0;i<shopCount();i++) {
+        float cx=shopCx(i); bool sc=(i==shopSel); panel(w,cx-90,120,180,292,{22,36,72,235},sc?gd:blue,sc?3:1.5f);
+        if (shopTab==0) { plane(w,cx+62,218,i); center(w,f,SKINS[i].name,22,cx,300,sf::Color::White); if(skinSel==i)center(w,f,"EQUIPPED",20,cx,345,{80,235,135}); else if(owned[i])center(w,f,"OWNED",20,cx,345,{120,210,255}); else center(w,f,std::to_string(SKINS[i].price)+" coins",20,cx,345,{255,205,70}); }
+        else { upgIcon(w,i,cx,180); center(w,f,UP_NAME[i],20,cx,248,sf::Color::White); center(w,f,UP_DESC[i],14,cx,292,{185,205,235}); for(int k=0;k<UP_MAX;k++)panel(w,cx-45+k*32,330,26,12,k<upg[i]?gd:sf::Color(30,45,80),blue,1); if(upg[i]>=UP_MAX)center(w,f,"MAXED",20,cx,372,{80,235,135}); else center(w,f,std::to_string(UP_COST[upg[i]])+" coins",20,cx,372,{255,205,70}); }
+    }
+    if (shopMsgT>0) center(w,f,shopMsg,24,500,445,{255,95,95});
+    center(w,f,"Left / Right: choose     Enter: buy or equip     Tab: skins / upgrades     Esc: back",18,500,480,{180,205,235});
+}
+void drawScores(sf::RenderWindow& w, sf::Font& f) {
+    sf::Color gd(255,210,70), cy(110,220,255); panel(w,15,15,970,570,{12,18,40,232},{70,185,255,200},2); center(w,f,"HIGH SCORES & MISSIONS",36,500,50,gd); txt(w,f,"TOP 5",26,100,100,cy);
+    for(int i=0;i<5;i++)txt(w,f,std::to_string(i+1)+". "+topNames[i]+"  "+(topScores[i]>0?std::to_string(topScores[i]):std::string("---")),30,100,150+i*62,i==0?gd:sf::Color::White);
+    txt(w,f,std::string("RANK: ")+RANK_NAME[rankOf(lifetime)]+"   ("+std::to_string(flights)+" flights)",20,100,475,{255,140,255}); txt(w,f,"MISSIONS  (bonus coins)",26,440,100,cy);
+    for(int i=0;i<NMIS;i++){float y=145+i*52;txt(w,f,MIS[i].text,19,440,y,missionDone[i]?sf::Color(85,235,135):sf::Color::White);txt(w,f,missionDone[i]?"DONE!":"Reward: +"+std::to_string(MIS[i].reward)+" coins",16,440,y+24,missionDone[i]?sf::Color(85,235,135):sf::Color(175,195,225));}
+}
+void startGame() {
+    score=0; scrollSpeed=BASE_SPEED[diff]; hitFlash=0; shake=0; lastLevel=0; bannerTime=3; phaseF=(themeSel>0?float(themeSel-1):0); phaseTarget=phaseF; slowT=0; doubleT=0; overT=0; coinsStart=coins; newRank=-1; combo=1; comboT=0; overdriveT=0; camY=0;
+    nova=0; novaFlash=0; hitStop=0; runT=0; dispScore=0; bossHitT=0; boostFx=0; rankBefore=rankOf(lifetime);
+    for(int i=0;i<NSTAT;i++)runStat[i]=0; for(int i=0;i<NMIS;i++)missionNow[i]=false; for(int i=0;i<2;i++)pl[i]=Player();
+    pl[0].alive=true; pl[0].lives=maxLives(); pl[0].skin=skinSel; pl[0].y=(numPlayers==2)?215.f:280.f;
+    if(numPlayers==2){pl[1].alive=true;pl[1].lives=maxLives();pl[1].skin=5;pl[1].y=345;}
+    for(int j=0;j<80;j++)cn[j].alive=false; for(int j=0;j<4;j++)pw[j].alive=false; for(int i=0;i<400;i++)ptc[i].life=0; for(int i=0;i<20;i++)ft[i].life=0; for(int i=0;i<3;i++)msg[i].t=0;
+    tCoin=2; tPower=9; resetObstacles();
+}
+int main() {
+    srand((unsigned)time(0)); initBackground(); loadAll(); loadSprites();
+    sf::RenderWindow window(sf::VideoMode({1000u, 600u}), "Escape The Twin Towers"); window.setFramerateLimit(60);
+    sf::Font font; if (!loadFont(font)) { std::cout << "No font found!\n"; return 1; }
+    sf::Music music; bool hasMusic = false; std::string mp = findMusic(); if (!mp.empty() && music.openFromFile(mp)) { music.setLooping(true); music.setVolume(40); hasMusic = true; }
+    std::vector<Sfx> sfxStore(SF_COUNT); sfx = sfxStore.data(); makeAllSfx();
+    State state = NOTICE, nextState = NOTICE; float noseX=-40, introT=0, menuTime=0, trailTimer=0, fadeA=0, pitch=1; int sel=0, howPage=0, fadeDir=0; bool boomDone=false, startRunOnFade=false; sf::Clock clock;
+    while (window.isOpen()) {
+        float dt = std::min(0.05f, clock.restart().asSeconds()); if (hitStop > 0) { hitStop -= dt; dt *= 0.06f; }
+        sf::Vector2f mouse = window.mapPixelToCoords(sf::Mouse::getPosition(window));
+        while (const std::optional event = window.pollEvent()) {
+            if (event->is<sf::Event::Closed>()) window.close(); if (fadeDir != 0) continue;
+            if (const auto* key = event->getIf<sf::Event::KeyPressed>()) {
+                K k=key->code; bool up=(k==K::Up||k==K::W), down=(k==K::Down||k==K::S), left=(k==K::Left||k==K::A), right=(k==K::Right||k==K::D), back=(k==K::Escape||k==K::Backspace);
+                if (state==NOTICE&&k==K::Enter) { nextState=INTRO; startRunOnFade=false; fadeDir=1; }
+                else if (state==INTRO&&k==K::Enter) { nextState=MENU; startRunOnFade=false; fadeDir=1; }
+                else if (state==MENU&&menuTime>1.3f) {
+                    if(up)sel=(sel+7)%8; else if(down)sel=(sel+1)%8;
+                    else if(k==K::Enter||k==K::Space||((left||right)&&sel>=5)){ playSfx(SF_CLICK); if(sel==0){startRunOnFade=true;fadeDir=1;} else if(sel<=3){nextState=(sel==1?SHOP:sel==2?HOWTO:SCORES);startRunOnFade=false;fadeDir=1;} else if(sel==4){saveAll();window.close();} else if(sel==5){numPlayers=3-numPlayers;saveAll();} else if(sel==6){diff=(diff+1)%3;saveAll();} else{themeSel=(themeSel+1)%6;saveAll();} }
+                } else if (state==HOWTO) { if(back){nextState=MENU;fadeDir=1;} else if(right&&howPage<2){howPage++;playSfx(SF_CLICK);} else if(left&&howPage>0){howPage--;playSfx(SF_CLICK);} }
+                else if (state==SHOP) { if(back){nextState=MENU;fadeDir=1;} else if(right&&shopSel<shopCount()-1){shopSel++;playSfx(SF_CLICK);} else if(left&&shopSel>0){shopSel--;playSfx(SF_CLICK);} else if(k==K::Tab||up||down){shopTab=1-shopTab;shopSel=(shopTab==0)?skinSel:0;playSfx(SF_CLICK);} else if(k==K::Enter||k==K::Space)shopAct(); }
+                else if (state==SCORES&&(back||k==K::Enter)) { nextState=MENU; fadeDir=1; }
+                else if (state==PLAYING) { if(k==K::Escape)state=PAUSED; else if(k==K::LShift||k==K::Space)tryBoost(0); else if(k==K::RShift||k==K::RControl)tryBoost(numPlayers==2?1:0); else if(k==K::E)tryRoll(0); else if(k==K::Backslash)tryRoll(numPlayers==2?1:0); else if(k==K::G)tryMissile(0); else if(k==K::Period)tryMissile(numPlayers==2?1:0); else if(k==K::C)tryFlare(0); else if(k==K::Comma)tryFlare(numPlayers==2?1:0); else if(k==K::V)fireNova(0); else if(k==K::Enter)fireNova(numPlayers==2?1:0); }
+                else if (state==PAUSED) { if(k==K::Escape)state=PLAYING; else if(k==K::R){startRunOnFade=true;fadeDir=1;} else if(k==K::Backspace){nextState=MENU;startRunOnFade=false;fadeDir=1;} }
+                else if (state==GAMEOVER) { if(k==K::R){startRunOnFade=true;fadeDir=1;} else if(k==K::Escape){nextState=MENU;startRunOnFade=false;fadeDir=1;} else if(newRank>=0&&k>=K::A&&k<=K::Z){entryName=entryName.substr(1)+char('A'+(int)k-(int)K::A);topNames[newRank]=entryName;saveAll();} }
+                if (k==K::M) { muted=!muted; if(hasMusic)music.setVolume(muted?0.f:40.f); if(sfx[SF_BGM].snd)sfx[SF_BGM].snd->setVolume(muted?0.f:38.f); }
+            }
+            if (const auto* jb = event->getIf<sf::Event::JoystickButtonPressed>()) {
+                int id=jb->joystickId;
+                if(state==PLAYING){if(jb->button==7)state=PAUSED;else if(jb->button==1)tryMissile(numPlayers==2?id:0);else if(jb->button==2)tryGun(numPlayers==2?id:0);else if(jb->button==3)tryFlare(numPlayers==2?id:0);else if(jb->button==4||jb->button==5)fireNova(numPlayers==2?id:0);else tryBoost(numPlayers==2?id:0);}
+                else if(state==PAUSED&&jb->button==7)state=PLAYING;
+                else if(state==MENU&&menuTime>1.3f&&jb->button==0){playSfx(SF_CLICK);if(sel==0){startRunOnFade=true;fadeDir=1;}else if(sel<=3){nextState=(sel==1?SHOP:sel==2?HOWTO:SCORES);startRunOnFade=false;fadeDir=1;}else if(sel==4){saveAll();window.close();}else if(sel==5){numPlayers=3-numPlayers;saveAll();}else if(sel==6){diff=(diff+1)%3;saveAll();}else{themeSel=(themeSel+1)%6;saveAll();}}
+                else if(state==GAMEOVER&&jb->button==0){startRunOnFade=true;fadeDir=1;}
+            }
+            if (event->is<sf::Event::MouseMoved>()&&state==MENU&&menuTime>1.3f) for(int i=0;i<8;i++)if(inBtn(MENU_BTN[i],mouse))sel=i;
+            if (event->is<sf::Event::MouseButtonPressed>()) {
+                if (state==MENU&&menuTime>1.3f) { for(int i=0;i<8;i++)if(inBtn(MENU_BTN[i],mouse)){sel=i;playSfx(SF_CLICK);if(i==0){startRunOnFade=true;fadeDir=1;}else if(i<=3){nextState=(i==1?SHOP:i==2?HOWTO:SCORES);startRunOnFade=false;fadeDir=1;}else if(i==4){saveAll();window.close();}else if(i==5){numPlayers=3-numPlayers;saveAll();}else if(i==6){diff=(diff+1)%3;saveAll();}else{themeSel=(themeSel+1)%6;saveAll();}break;} }
+                else if (state==HOWTO||state==SHOP||state==SCORES) { if(inBtn(BACK_BTN,mouse)){playSfx(SF_CLICK);nextState=MENU;startRunOnFade=false;fadeDir=1;} else if(state==HOWTO&&howPage<2&&inBtn(NEXT_BTN,mouse)){howPage++;playSfx(SF_CLICK);} else if(state==HOWTO&&howPage>0&&inBtn(PREV_BTN,mouse)){howPage--;playSfx(SF_CLICK);} else if(state==SHOP){if(inBtn(SHOP_BTN,mouse))shopAct();for(int t=0;t<2;t++)if(inBtn(TAB_BTN[t],mouse)&&shopTab!=t){shopTab=t;shopSel=(t==0)?skinSel:0;playSfx(SF_CLICK);}for(int i=0;i<shopCount();i++)if(std::fabs(mouse.x-shopCx(i))<90&&mouse.y>118&&mouse.y<414){shopSel=i;playSfx(SF_CLICK);}} }
+            }
+        }
+        bool inGame=(state==PLAYING||state==PAUSED||state==GAMEOVER), boosting=(state==PLAYING)&&((pl[0].alive&&pl[0].boostT>0)||(pl[1].alive&&pl[1].boostT>0));
+        float bg=(state==PLAYING)?scrollSpeed/250.f*(slowT>0?0.5f:1):(state==PAUSED?0:state==GAMEOVER?0.15f:0.5f);
+        boostFx+=((boosting?1.f:0)-boostFx)*std::min(1.f,8*dt); bg*=1+0.8f*boostFx;
+        if(state==INTRO){phaseF=1;phaseTarget=1;} else if(!inGame)phaseTarget=(themeSel>0?float(themeSel-1):0); else if(state==PLAYING)phaseTarget=(themeSel>0?float(themeSel-1):float(score/200));
+        updateBackground(dt, bg);
+        if (fadeDir==1&&(fadeA+=dt/0.18f)>=1) { fadeA=1; fadeDir=-1; if(startRunOnFade){startGame();state=PLAYING;if(hasMusic)music.play();else playSfx(SF_BGM);startRunOnFade=false;} else{state=nextState;menuTime=2;howPage=0;if(state==SHOP){shopTab=0;shopSel=skinSel;}if(state==INTRO){noseX=-40;introT=0;boomDone=false;trailTimer=0;shocks.clear();}} }
+        else if (fadeDir==-1&&(fadeA-=dt/0.25f)<=0) { fadeA=0; fadeDir=0; }
+        if (state==INTRO) { introT+=dt; noseX+=460*dt; trailTimer-=dt; if(trailTimer<=0&&noseX<1180){trailTimer=0.025f;addPart(noseX-134,PLANE_Y+1,-160,rnd(-10,10),0.75f,4,{255,220,140,180});addPart(noseX-214,PLANE_Y-54,-160,rnd(-8,8),0.65f,3,{210,235,255,160});addPart(noseX-214,PLANE_Y+56,-160,rnd(-8,8),0.65f,3,{210,235,255,160});} if(!boomDone&&noseX>=TOWER_X+60){boomDone=true;shake=0.45f;playSfx(SF_BOOST);addShock(noseX-40,PLANE_Y,175,{140,235,255});addShock(noseX-40,PLANE_Y,110,{255,215,90});} if(introT>=4){nextState=MENU;startRunOnFade=false;fadeDir=1;} updateEffects(dt); }
+        else if (state!=NOTICE) menuTime+=dt;
+        if (state==PLAYING) {
+            int level=score/200; if(level!=lastLevel){lastLevel=level;bannerTime=3;playSfx(SF_TIER);}
+            bannerTime=std::max(0.f,bannerTime-dt); scrollSpeed=std::min(BASE_SPEED[diff]+level*20,480.f); runT+=dt; slowT=std::max(0.f,slowT-dt); doubleT=std::max(0.f,doubleT-dt); overdriveT=std::max(0.f,overdriveT-dt);
+            dispScore+=(score-dispScore)*std::min(1.f,9*dt); if(std::fabs(score-dispScore)<1)dispScore=score; float wdt=dt*(slowT>0?0.5f:1); if(combo>1&&(comboT-=dt)<=0)combo=1;
+            refX=300; bool first=true; for(int i=0;i<2;i++)if(pl[i].alive){updatePlayer(i,dt);refX=first?pl[i].x:std::min(refX,pl[i].x);first=false;}
+            camY+=((pl[0].alive?(pl[0].y-280)*0.08f:0)-camY)*std::min(1.f,5*dt);
+            updateObstacles(wdt,scrollSpeed,level); updateCombat(dt,wdt,level); updatePickups(wdt,scrollSpeed);
+            for(int i=0;i<2;i++)if(pl[i].alive&&pl[i].inv<=0){sf::FloatRect b=bodyBox(pl[i]),wg=wingBox(pl[i]);if(obstaclesHit(b)||obstaclesHit(wg)){hurtPlayer(i);continue;}for(Obstacle& o:obs){bool nr=obstacleTouches(o,grow(b,14))||obstacleTouches(o,grow(wg,14));int bit=1<<i;if(nr)o.zone|=bit;else if(o.zone&bit){o.zone&=~bit;bumpCombo();addNova(0.06f);score+=5*combo;runStat[S_NEAR]++;addText(pl[i].x-60,pl[i].y-45,"CLOSE CALL +"+std::to_string(5*combo),{255,230,60});playSfx(SF_NEAR);}}}
+            checkMissions(); if(!anyAlive()&&(overT+=dt)>1.2f){state=GAMEOVER;hitFlash=1;lifetime+=score;flights++;newRank=addHighScore(score);saveAll();}
+        } else camY+=(0-camY)*std::min(1.f,4*dt);
+        if (state==PLAYING||state==GAMEOVER) { updateEffects(dt); for(int i=0;i<20;i++)if(ft[i].life>0){ft[i].life-=dt;ft[i].y-=40*dt;} for(int i=0;i<3;i++)msg[i].t=std::max(0.f,msg[i].t-dt); }
+        if (state!=PAUSED) { shake=std::max(0.f,shake-1.6f*dt); hitFlash=std::max(0.f,hitFlash-1.5f*dt); shopMsgT=std::max(0.f,shopMsgT-dt); novaFlash=std::max(0.f,novaFlash-2.2f*dt); bossHitT=std::max(0.f,bossHitT-dt); }
+        float tp=(state==PLAYING)?std::min(1.3f,1+0.03f*(score/200)+(bossT>0?0.12f:0)):1; pitch+=(tp-pitch)*std::min(1.f,2*dt); if(hasMusic)music.setPitch(pitch); if(sfx[SF_BGM].snd)sfx[SF_BGM].snd->setPitch(pitch);
+        window.clear({15,22,42});
+        if (shake>0||boostFx>0.01f) { float a=shake*14; sf::View v(sf::FloatRect({rnd(-a,a),rnd(-a,a)},{1000,600})); v.zoom(1-0.05f*boostFx); window.setView(v); } else window.setView(window.getDefaultView());
+        drawBackground(window, inGame); if (state==NOTICE||state==INTRO||state==MENU) tower(window);
+        if (state==MENU) plane(window, std::fmod(menuTime*240,2600.f)-300, 360+40*std::sin(menuTime*0.8f), skinSel, 0, 1.2f);
+        if (inGame) { drawBoss(window); drawObstacles(window); drawPickups(window,font); drawCombat(window,font); for(int i=0;i<2;i++)drawPlayer(window,font,i); drawEffects(window,font); drawForegroundSilhouettes(window); if(slowT>0)box(window,-30,-30,1060,660,{150,90,230,28}); }
+        if (state==INTRO) { drawEffects(window,font); plane(window,noseX-80,PLANE_Y-55,2,-4,1.8f); plane(window,noseX-80,PLANE_Y+55,2,4,1.8f); plane(window,noseX,PLANE_Y,skinSel,0,2.4f); }
+        window.setView(window.getDefaultView()); if (inGame||state==MENU||state==INTRO) vignette(window, 85+70*boostFx);
+        if (novaFlash>0) box(window,0,0,1000,600,{255,255,255,(std::uint8_t)(std::min(1.f,novaFlash)*200)});
+        if (state==NOTICE) { panel(window,100,150,800,300,{12,18,40,235},{70,185,255,200},2); center(window,font,"CONTENT NOTICE",40,500,200,{255,210,70}); center(window,font,"This game is inspired by the events of September 11, 2001.",22,500,270,sf::Color::White); center(window,font,"It is a fictionalized obstacle-avoidance game and shows no casualties.",22,500,305,{185,210,240}); center(window,font,"Press ENTER to continue",26,500,390,{110,220,255}); }
+        else if (state==INTRO) { if(boomDone){float tr=std::clamp((introT-1.5f)*1.4f,0.f,1.f);std::uint8_t a=tr*240;panel(window,130,195,740,110,{10,15,36,(std::uint8_t)(a*0.85f)},{70,190,255,a},2);center(window,font,"ESCAPE THE TWIN TOWERS",44,500,242,{255,225,110,a});box(window,240,278,520*tr,3,{100,220,255,a});} label(window,font,"Press ENTER to skip",18,410,565,sf::Color::White); }
+        else if (state==MENU) { title(window,font,menuTime); if(menuTime>1.3f){panel(window,200,145,600,36,{12,18,40,210},{70,185,255,180},1.5f);center(window,font,std::string("RANK: ")+RANK_NAME[rankOf(lifetime)]+"      BEST: "+std::to_string(best)+"      COINS: "+std::to_string(coins),20,500,163,{255,220,90});for(int i=0;i<5;i++)drawBtn(window,font,MENU_BTN[i],MENU_TXT[i],sel==i);drawBtn(window,font,MENU_BTN[5],std::string("MODE: ")+(numPlayers==1?"1 PLAYER":"2 PLAYERS"),sel==5,19);drawBtn(window,font,MENU_BTN[6],std::string("LEVEL: ")+DIFF_NAME[diff],sel==6,19);drawBtn(window,font,MENU_BTN[7],std::string("THEME: ")+THEME_NAME[themeSel],sel==7,19);label(window,font,"Move: WASD  Gun: F  Missile: G  Flare: C  Evade: E  Boost: Shift  Nova: V  M: Mute",17,100,550,sf::Color::White);} }
+        else if (state==HOWTO||state==SHOP||state==SCORES) { if(state==HOWTO)drawHowTo(window,font,howPage);else if(state==SHOP)drawShop(window,font);else drawScores(window,font); drawBtn(window,font,BACK_BTN,"< BACK",inBtn(BACK_BTN,mouse),22); if(state==HOWTO&&howPage>0)drawBtn(window,font,PREV_BTN,"< PREV",inBtn(PREV_BTN,mouse),22); if(state==HOWTO&&howPage<2)drawBtn(window,font,NEXT_BTN,"NEXT >",inBtn(NEXT_BTN,mouse),22); if(state==SHOP){std::string lbl=(shopTab==0)?(owned[shopSel]?(skinSel==shopSel?"EQUIPPED":"EQUIP"):"BUY - "+std::to_string(SKINS[shopSel].price)+" COINS"):(upg[shopSel]>=UP_MAX?"MAXED OUT":"UPGRADE - "+std::to_string(UP_COST[upg[shopSel]])+" COINS");drawBtn(window,font,SHOP_BTN,lbl,inBtn(SHOP_BTN,mouse),22);} }
+        else {
+            int tier=score/200; if(((pl[0].alive&&pl[0].lives==1)||(pl[1].alive&&pl[1].lives==1))&&state==PLAYING){std::uint8_t va=35+30*std::sin(bgTime*7);box(window,0,0,1000,18,{220,20,30,va});box(window,0,582,1000,18,{220,20,30,va});}
+            drawHud(window,font); if(bannerTime>0&&state!=GAMEOVER){int a=255*std::min(1.f,bannerTime);panel(window,250,140,500,70,{10,15,36,(std::uint8_t)(a*0.85f)},{100,215,255,(std::uint8_t)a},2);center(window,font,"TIER "+std::to_string(tier+1)+" - "+STAGE[tier%5],34,500,175,{255,255,255,(std::uint8_t)a});}
+            for(int i=0;i<3;i++)if(msg[i].t>0){float a=std::min(1.f,msg[i].t);sf::Color c=msg[i].c;c.a=a*255;panel(window,100,232+i*48,800,40,{10,14,32,(std::uint8_t)(a*200)},{c.r,c.g,c.b,(std::uint8_t)(a*200)},1.5f);center(window,font,msg[i].s,22,500,252+i*48,c);}
+            if(state==PLAYING&&runT<8){std::uint8_t a=255*std::min(1.f,8-runT);panel(window,80,516,730,62,{10,15,34,(std::uint8_t)(a*0.8f)},{100,215,255,a},1.5f);center(window,font,numPlayers==1?"MOVE: WASD/Arrows  GUN: F  MISSILE: G  FLARE: C  EVADE: E  BOOST: Shift":"P1: WASD, F gun, G missile, C flare, E evade, Shift boost, V nova",16,445,536,{255,255,255,a});center(window,font,numPlayers==1?"NOVA BOMB: V (when full)   PAUSE: ESC   MUTE: M":"P2: Arrows, / gun, . missile, , flare, \\ evade, RShift boost, ENTER nova",16,445,560,{255,215,90,a});}
+            if(hitFlash>0)box(window,0,0,1000,600,{255,0,0,(std::uint8_t)(hitFlash*110)});
+            if(state==PAUSED){box(window,0,0,1000,600,{8,12,26,170});panel(window,200,160,600,220,{14,20,44,235},{70,185,255,210},2);center(window,font,"PAUSED",56,500,230,{255,210,70});center(window,font,"ESC: Resume    R: Restart    BACKSPACE: Main menu",22,500,315,sf::Color::White);}
+            if(state==GAMEOVER){box(window,0,0,1000,600,{8,12,26,180});panel(window,150,70,700,465,{14,20,44,240},{245,75,85,220},2);center(window,font,"GAME OVER",60,500,125,{255,85,95});center(window,font,"Score: "+std::to_string(score)+"     Best: "+std::to_string(best),30,500,192,sf::Color::White);center(window,font,"Enemies downed: "+std::to_string(runStat[S_KILLS])+"     Close calls: "+std::to_string(runStat[S_NEAR])+"     Tier reached: "+std::to_string(score/200+1),18,500,228,{185,210,240});if(newRank>=0)center(window,font,"NEW HIGH SCORE! (#"+std::to_string(newRank+1)+")  Type initials: "+entryName,22,500,262,{255,210,60});center(window,font,"Coins earned: +"+std::to_string(coins-coinsStart)+"        Total: "+std::to_string(coins),22,500,298,{120,220,255});int ln=0;if(rankOf(lifetime)>rankBefore){center(window,font,std::string("RANK UP!   You are now a ")+RANK_NAME[rankOf(lifetime)],24,500,336,{255,140,255});ln++;}for(int i=0;i<NMIS;i++)if(missionNow[i]){center(window,font,std::string("MISSION COMPLETE: ")+MIS[i].text+"  (+"+std::to_string(MIS[i].reward)+")",19,500,336+ln*30,{85,235,135});ln++;}center(window,font,"R: Retry    ESC: Main menu",24,500,500,{255,210,70});}
+        }
+        if (fadeA > 0) box(window, 0, 0, 1000, 600, {0, 0, 0, (std::uint8_t)(fadeA * 255)});
+        window.display();
+    }
+    saveAll(); return 0;
+}
