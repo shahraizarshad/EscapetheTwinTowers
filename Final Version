@@ -79,7 +79,7 @@ void playSfx(int id) {
 struct Skin {
     const char* name;
     sf::Color body, accent, glass, wing; int price;
-}; const int NSK = 5; const Skin SKINS[6] = { {"CLASSIC",{235,235,245        } ,{200,40,40    } ,{90,160,215} ,{175,185,205} ,0} ,{"SUNSET",{255,225,190} ,{235,110,30} ,{255,240,160} ,{225,160,110} ,30} ,{"STEALTH",{70,75,90} ,{40,200,220} ,{30,50,70} ,{50,55,70} ,60} ,{"GOLD",{245,205,70} ,{150,100,10} ,{255,250,210} ,{200,160,50} ,100} ,{"NEON",{30,30,45} ,{255,60,200} ,{80,255,160} ,{60,60,90} ,150} ,{"CO-PILOT",{200,240,220} ,{30,150,90} ,{250,250,150} ,{120,190,150} ,0}
+}; const int NSK = 6; const Skin SKINS[6] = { { "CLASSIC",{ 235,235,245 } ,{ 200,40,40 } ,{ 90,160,215 } ,{ 175,185,205 } ,0 } ,{ "SUNSET",{ 255,225,190 } ,{ 235,110,30 } ,{ 255,240,160 } ,{ 225,160,110 } ,30 } ,{ "STEALTH",{ 70,75,90 } ,{ 40,200,220 } ,{ 30,50,70 } ,{ 50,55,70 } ,60 } ,{ "GOLD",{ 245,205,70 } ,{ 150,100,10 } ,{ 255,250,210 } ,{ 200,160,50 } ,100 } ,{ "NEON",{ 30,30,45 } ,{ 255,60,200 } ,{ 80,255,160 } ,{ 60,60,90 } ,150 } ,{ "CO-PILOT",{ 200,240,220 } ,{ 30,150,90 } ,{ 250,250,150 } ,{ 120,190,150 } ,0 }
 }; enum { S_NEAR, S_KILLS, NSTAT }; int runStat[NSTAT], topScores[5] = { 0,0,0,0,0 }; bool owned[NSK] = { true,false,false,false,false }; void saveAll() {
     std::ofstream f("save.txt");
     f << coins << ' ' << skinSel << ' ' << diff << ' ' << numPlayers << '\n'; for (int i = 0; i < NSK; i++) f << owned[i] << ' '; f << '\n'; for (int i = 0; i < 5; i++) f << topScores[i] << " ACE "; f << '\n'; f << '\n';
@@ -105,8 +105,50 @@ void loadAll() {
         s4 >> upg[i];
         upg[i] = std::clamp(upg[i], 0, UP_MAX);
     }
-    s4 >> lifetime >> flights >> themeSel; if (lifetime < 0) lifetime = 0; themeSel = std::clamp(themeSel, 0, 5); owned[0] = true; coins = std::max(0, coins); if (skinSel < 0 || skinSel >= NSK || !owned[skinSel]) skinSel = 0;
-    diff = std::clamp(diff, 0, 2); if (numPlayers != 2) numPlayers = 1; best = topScores[0];
+    s4 >> lifetime >> flights >> themeSel;
+
+    if (lifetime < 0)
+        lifetime = 0;
+
+    if (flights < 0)
+        flights = 0;
+
+    themeSel = std::clamp(themeSel, 0, 5);
+
+    owned[0] = true;
+
+    coins = std::clamp(coins, 0, 1000000);
+
+    diff = std::clamp(diff, 0, 2);
+
+    numPlayers = (numPlayers == 2) ? 2 : 1;
+
+    for (int i = 0; i < 5; i++)
+    {
+        topScores[i] = std::max(0, topScores[i]);
+    }
+
+    for (int i = 0; i < NUP; i++)
+    {
+        upg[i] = std::clamp(upg[i], 0, UP_MAX);
+    }
+
+    lifetime = std::min(lifetime, 100000000);
+    flights = std::min(flights, 1000000);
+
+    for (int i = 1; i < NSK; i++)
+    {
+        owned[i] = owned[i] ? true : false;
+    }
+
+    if (skinSel < 0 || skinSel >= NSK || !owned[skinSel])
+    {
+        skinSel = 0;
+    }
+
+    std::sort(topScores, topScores + 5, std::greater<int>());
+
+    best = topScores[0];
 }
 int addHighScore(int s) {
     int pos = -1;
@@ -184,10 +226,10 @@ void glow(sf::RenderWindow& w, float x, float y, float rad, sf::Color c) {
 }
 void vignette(sf::RenderWindow& w, std::uint8_t a) {
     const sf::Color o(4, 8, 22, a), z(4, 8, 22, 0);
-    const float d = 120, W = 1000, H = 600; sf::Vertex t[4] = { {{0,0            } ,o    } ,{{W,0    } ,o} ,{{0,d} ,z} ,{{W,d} ,z}
-    }, b[4] = { {{0,H    } ,o} ,{{W,H} ,o} ,{{0,H - d} ,z} ,{{W,H - d} ,z}
-    }, l[4] = { {{0,0    } ,o} ,{{0,H} ,o} ,{{d,0} ,z} ,{{d,H} ,z}
-    }, r[4] = { {{W,0    } ,o} ,{{W,H} ,o} ,{{W - d,0} ,z} ,{{W - d,H} ,z}
+    const float d = 120, W = 1000, H = 600; sf::Vertex t[4] = { { { 0,0 } ,o } ,{ { W,0 } ,o } ,{ { 0,d } ,z } ,{ { W,d } ,z }
+    }, b[4] = { { { 0,H } ,o } ,{ { W,H } ,o } ,{ { 0,H - d } ,z } ,{ { W,H - d } ,z }
+    }, l[4] = { { { 0,0 } ,o } ,{ { 0,H } ,o } ,{ { d,0 } ,z } ,{ { d,H } ,z }
+    }, r[4] = { { { W,0 } ,o } ,{ { W,H } ,o } ,{ { W - d,0 } ,z } ,{ { W - d,H } ,z }
     }; w.draw(t, 4, sf::PrimitiveType::TriangleStrip); w.draw(b, 4, sf::PrimitiveType::TriangleStrip); w.draw(l, 4, sf::PrimitiveType::TriangleStrip); w.draw(r, 4, sf::PrimitiveType::TriangleStrip);
 }
 void drawPts(sf::RenderWindow& w, float x, float y, float sc, int n, const float* pts, sf::Color c) {
@@ -280,7 +322,7 @@ void title(sf::RenderWindow& w, sf::Font& f, float t0) {
 struct Look {
     sf::Color top, bottom, mtn, farC, nearC, cloud, ground, body;
     float bodyY, bodyA, night, rain, stars;
-}; const Look PAL[5] = { {{28,125,220        } ,{150,228,255    } ,{115,180,222} ,{86,142,190} ,{58,108,156} ,{255,255,255} ,{52,64,78} ,{255,245,175} ,90,255,0,0,0} ,{{58,28,108    } ,{255,122,78} ,{145,62,125} ,{102,44,102} ,{68,28,78} ,{255,185,155} ,{48,40,62} ,{255,155,60} ,335,255,0.45f,0,0.15f} ,{{24,34,58    } ,{76,118,136} ,{48,72,92} ,{38,56,74} ,{28,42,58} ,{92,108,128} ,{32,42,52} ,{160,185,205} ,200,0,0.6f,1,0} ,{{6,10,34    } ,{46,32,96} ,{26,24,68} ,{18,18,52} ,{12,14,38} ,{68,78,125} ,{20,24,38} ,{235,242,255} ,90,255,1,0,1} ,{{68,92,195    } ,{255,186,148} ,{152,135,188} ,{118,104,158} ,{86,76,128} ,{255,222,208} ,{54,68,74} ,{255,210,135} ,340,255,0.3f,0,0}
+}; const Look PAL[5] = { { { 28,125,220 } ,{ 150,228,255 } ,{ 115,180,222 } ,{ 86,142,190 } ,{ 58,108,156 } ,{ 255,255,255 } ,{ 52,64,78 } ,{ 255,245,175 } ,90,255,0,0,0 } ,{ { 58,28,108 } ,{ 255,122,78 } ,{ 145,62,125 } ,{ 102,44,102 } ,{ 68,28,78 } ,{ 255,185,155 } ,{ 48,40,62 } ,{ 255,155,60 } ,335,255,0.45f,0,0.15f } ,{ { 24,34,58 } ,{ 76,118,136 } ,{ 48,72,92 } ,{ 38,56,74 } ,{ 28,42,58 } ,{ 92,108,128 } ,{ 32,42,52 } ,{ 160,185,205 } ,200,0,0.6f,1,0 } ,{ { 6,10,34 } ,{ 46,32,96 } ,{ 26,24,68 } ,{ 18,18,52 } ,{ 12,14,38 } ,{ 68,78,125 } ,{ 20,24,38 } ,{ 235,242,255 } ,90,255,1,0,1 } ,{ { 68,92,195 } ,{ 255,186,148 } ,{ 152,135,188 } ,{ 118,104,158 } ,{ 86,76,128 } ,{ 255,222,208 } ,{ 54,68,74 } ,{ 255,210,135 } ,340,255,0.3f,0,0 }
 }; Look look = PAL[0]; float phaseF = 0, phaseTarget = 0, mtnH[20], mtnOff = 0, cloudX[10], cloudY[10], cloudS[10], cloudV[10], stX[16], stY[16], stL[16], rainX[75], rainY[75], starX[60], starY[60], groundOff = 0, fgOff = 0; struct Skyline {
     float x[30], w[30], h[30], total, offset, speed;
     sf::Color col;
@@ -476,7 +518,7 @@ bool touches(const sf::FloatRect& a, const sf::FloatRect& b) {
     return a.findIntersection(b).has_value();
 }
 sf::FloatRect grow(const sf::FloatRect& r, float m) {
-    return { {r.position.x - m, r.position.y - m        } ,{r.size.x + 2 * m, r.size.y + 2 * m    }
+    return { { r.position.x - m, r.position.y - m } ,{ r.size.x + 2 * m, r.size.y + 2 * m }
     };
 }
 void bumpCombo() {
@@ -504,11 +546,11 @@ float missileCdTime() {
     return MISSILE_CD - 0.25f * upg[2];
 }
 sf::FloatRect bodyBox(const Player& p) {
-    return { {p.x - 125, p.y - 12        } ,{120, 24    }
+    return { { p.x - 125, p.y - 12 } ,{ 120, 24 }
     };
 }
 sf::FloatRect wingBox(const Player& p) {
-    return { {p.x - 100, p.y + 10        } ,{40, 32    }
+    return { { p.x - 100, p.y + 10 } ,{ 40, 32 }
     };
 }
 bool anyAlive() {
@@ -556,16 +598,16 @@ float cranePos(const Obstacle& o, float& cx, float& cy) {
 }
 sf::FloatRect obstacleBox(const Obstacle& o) {
     float cx = 0, cy = 0;
-    if (o.type == O_CLOUD) return { {o.x + 14,o.y + 18        } ,{o.w - 28,o.h - 28    }
+    if (o.type == O_CLOUD) return { { o.x + 14,o.y + 18 } ,{ o.w - 28,o.h - 28 }
     };
-    if (o.type == O_BIRD || o.type == O_DRONE) return { {o.x + 4,o.y + 3    } ,{o.w - 8,o.h - 6}
-    }; if (o.type == O_BOLT) return { {o.x,o.y    } ,{o.w,o.h}
+    if (o.type == O_BIRD || o.type == O_DRONE) return { { o.x + 4,o.y + 3 } ,{ o.w - 8,o.h - 6 }
+    }; if (o.type == O_BOLT) return { { o.x,o.y } ,{ o.w,o.h }
     }; if (o.type == O_CRANE) {
         cranePos(o, cx, cy);
-        return { {cx - 22,cy - 22        } ,{44,44    }
+        return { { cx - 22,cy - 22 } ,{ 44,44 }
         };
     }
-    return { {o.x + 3,o.y    } ,{o.w - 6,o.h}
+    return { { o.x + 3,o.y } ,{ o.w - 6,o.h }
     };
 }
 bool obstacleTouches(const Obstacle& o, const sf::FloatRect& r) {
@@ -725,7 +767,7 @@ void drawBoss(sf::RenderWindow& w) {
         ball(w, ex, ey, 20, sf::Color::White); ball(w, ex - d * 5, ey + 3, 9, { 235,30,30 }); poly(w, 4, br, { 20,20,30 }); if (bossHp < bossMaxHp * 0.5f) glow(w, ex, ey, 34 + 5 * std::sin(bgTime * 12), { 255,40,40,90 });
     }
 }
-const sf::Color POW_COL[NPW] = { {60,150,255    } ,{170,90,230} ,{230,70,70} ,{50,190,90} ,{255,180,40}
+const sf::Color POW_COL[NPW] = { { 60,150,255 } ,{ 170,90,230 } ,{ 230,70,70 } ,{ 50,190,90 } ,{ 255,180,40 }
 }; const char* POW_LETTER[NPW] = { "S","T","M","x2","W" }; void spawnCoinLine(float x, float y, int n, bool wave) {
     for (int i = 0;i < n;i++) {
         float cy = std::clamp(y + (wave ? 45 * std::sin(i * 0.9f) : 0), 70.f, 500.f);
@@ -1139,8 +1181,8 @@ void drawHud(sf::RenderWindow& w, sf::Font& f) {
 }
 struct Btn {
     float cx, cy, w, h;
-}; const Btn MENU_BTN[7] = { {500, 225, 260, 46    } ,{500, 280, 260, 46} ,{500, 335, 260, 46} ,{500, 390, 260, 46} ,{240, 500, 220, 38} ,{500, 500, 220, 38} ,{760, 500, 220, 38}
-}; const Btn BACK_BTN = { 100,560,150,40 }, SHOP_BTN = { 500,525,300,46 }, TAB_BTN[2] = { {405,92,180,32} ,{595,92,180,32}
+}; const Btn MENU_BTN[7] = { { 500, 225, 260, 46 } ,{ 500, 280, 260, 46 } ,{ 500, 335, 260, 46 } ,{ 500, 390, 260, 46 } ,{ 240, 500, 220, 38 } ,{ 500, 500, 220, 38 } ,{ 760, 500, 220, 38 }
+}; const Btn BACK_BTN = { 100,560,150,40 }, SHOP_BTN = { 500,525,300,46 }, TAB_BTN[2] = { { 405,92,180,32 } ,{ 595,92,180,32 }
 }; const char* MENU_TXT[4] = { "PLAY", "SHOP", "SCORES", "EXIT" }; int shopCount() {
     return shopTab == 0 ? NSK : NUP;
 }
@@ -1306,6 +1348,8 @@ int main() {
             }
             if (const auto* jb = event->getIf<sf::Event::JoystickButtonPressed>()) {
                 int id = jb->joystickId;
+                if (id < 0 || id > 1)
+                    continue;
                 if (state == PLAYING) {
                     if (jb->button == 7)state = PAUSED;
                     else if (jb->button == 1)tryMissile(numPlayers == 2 ? id : 0); else if (jb->button == 2)tryGun(numPlayers == 2 ? id : 0); else if (jb->button == 3)tryFlare(numPlayers == 2 ? id : 0); else if (jb->button == 4 || jb->button == 5)fireNova(numPlayers == 2 ? id : 0); else tryBoost(numPlayers == 2 ? id : 0);
