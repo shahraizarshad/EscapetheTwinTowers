@@ -1,10 +1,64 @@
-# EscapetheTwinTowers
-**A 2D game coded in c++ with SFML.**
+Escape The Twin Towers
+A 2D arcade-style aerial survival game developed in C++ using SFML. Players control aircraft to avoid obstacles, defeat enemies, collect power-ups, earn coins, unlock upgrades, and survive increasingly difficult stages.
 
-## Major Contributions, as of now :
+  Features
+Single Player and Two Player Modes
+Dynamic Enemy System
+Boss Battles
+Upgrade and Shop System
+Multiple Aircraft Skins
+Power-ups and Special Abilities
+High Score Tracking
+Dynamic Weather and Theme System
+Particle Effects and Visual Feedback
+Sound Effects and Music Support
+    Technologies Used
+C++
+SFML (Simple and Fast Multimedia Library)
+File Handling for Save System
+Team Members and Contributions
+Fatima Khan (26L-0731)
+Display and User Interface Development
 
-**1. Shahraiz Arshad (26L-0678)** coded for the basic structure of game using rectangles and simple shapes initially. Later, updated those blocks of code using structs that made the game look closer to the desired shapes. In the code pushed so far, the frame/ game window is static which will later be merged with code of other contributor to make it move along the aircraft that is already moving. Moreover, the obstacles' shape will be improved from dark clouds to something else.
+Menu System
+HUD (Heads-Up Display)
+Scoreboard Screens
+Shop Interface
+Pause and Game Over Screens
+Text Rendering and UI Layout
+Shahraiz Arshad (26L-0678)
+Visuals and Shape Design
 
-**2. Fatima Khan (L26-0731)** coded the visual scene using three basic functions: box for rectangles, ball for circles and poly for shapes with any number of corners. Using these, she built clouds with adjustable size, a tower with 30 windows made by loops, and a plane drawn from its nose tip so it can be moved by changing two values. The plane is drawn last, so it appears in front of everything.
+Aircraft Visual Design
+Enemy Visual Design
+Tower and Obstacle Graphics
+Background Rendering
+Environmental Effects
+Shape-Based Graphics and Animations
+Abdullah Zahid (26L-0685)
+Gameplay and Collision System
 
-**3. Abdullah Zahid (26L-0685)** worked on the structure and basic framework of game where, in the intro, a plane flies left to right trailing smoke until it hits the tower, triggering 120 explosion particles and a “BOOM!” before the menu appears. Obstacles (towers, storm clouds, birds, wind, gates, lightning, cranes, drones) share one struct and vector, spawn from timers at the screen edges, and unlock as the tier (score / 200) rises. The screen movement is a parallax background of skylines, clouds, ground and rain scrolling at different speeds, while the sky blends from day through sunset, storm, night and dawn. Each obstacle passed gives +10 points, and hitting one ends the run and saves the best score to best.txt. Pressing Play, Retry or Restart calls startGame(), which resets the score, speed, plane position and sky, then clears all obstacles and restarts their spawn timers.
+Core Gameplay Mechanics
+Player Controls
+Enemy Behavior
+Collision Detection
+Power-Up Logic
+Boss Mechanics
+Combat System
+Scoring System
+Build Requirements
+C++17 or later
+SFML 3.0
+Windows/Linux Environment
+How to Run
+Install SFML.
+Clone the repository.
+Build the project using your preferred C++ compiler.
+Ensure all assets are placed in the appropriate assets directory.
+Run the executable.
+Developed by:
+
+Fatima Khan (26L-0731)
+Shahraiz Arshad (26L-0678)
+Abdullah Zahid (26L-0685)
+
